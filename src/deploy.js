@@ -359,8 +359,15 @@ export async function instanceStatus(url) {
   } catch (err) {
     if (err?.name === 'TimeoutError') return { ...blank, error: 'no answer within 5s' };
     // fetch() reports every network failure as "fetch failed" and hides the
-    // useful part (ECONNREFUSED, ENOTFOUND, a TLS error) in the cause.
-    const detail = err?.message === 'fetch failed' && err?.cause?.message ? err.cause.message : err?.message;
+    // useful part (ECONNREFUSED, ENOTFOUND, a TLS error) in the cause. A host
+    // that resolves to both ::1 and 127.0.0.1 nests them in an AggregateError.
+    let detail = err?.message;
+    const cause = err?.cause;
+    if (detail === 'fetch failed' && cause) {
+      detail = cause.message
+        || (Array.isArray(cause.errors) ? [...new Set(cause.errors.map((e) => e?.message).filter(Boolean))].join('; ') : '')
+        || detail;
+    }
     return { ...blank, error: String(detail || err) };
   }
 
