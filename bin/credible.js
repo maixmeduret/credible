@@ -67,6 +67,146 @@ const commands = {
     process.on('SIGTERM', shutdown);
   },
 
+  /** Check an instance is actually usable, and say what to fix. */
+  async doctor() {
+    const { diagnose, formatReport } = await import('../src/doctor.js');
+    const report = await diagnose({
+      url: flags.url || positional[0] || instanceOrigin(),
+      domain: flags.domain || '',
+      apiKey: flags['api-key'] || process.env.CREDIBLE_API_KEY || '',
+      siteUrl: flags['site-url'] || '',
+      local: !flags.remote,
+    });
+    if (flags.json) log.print(JSON.stringify(report, null, 2));
+    else log.print(formatReport(report));
+    if (!report.healthy) process.exitCode = 1;
+  },
+
+  /** Stand up a persistent instance: launchd/systemd, a tunnel, Docker or Fly. */
+  async deploy() {
+    const { deploy, detectEnvironment } = await import('../src/deploy.js');
+    const target = flags.target || 'auto';
+
+    if (flags.detect) {
+      const environment = detectEnvironment();
+      log.print(flags.json ? JSON.stringify(environment, null, 2) : formatEnvironment(environment));
+      return;
+    }
+
+    const result = await deploy({
+      target,
+      port: Number(flags.port || config.port),
+      dataDir: flags['data-dir'],
+      appName: flags['app-name'],
+      region: flags.region,
+      yes: Boolean(flags.yes),
+      dryRun: Boolean(flags['dry-run']),
+      onProgress: flags.json ? undefined : (step) => log.print(`  ${step.done ? '✓' : '…'} ${step.message}`),
+    });
+
+    if (flags.json) {
+      log.print(JSON.stringify(result, null, 2));
+      return;
+    }
+    log.print('');
+    log.print(`  target     ${result.target}`);
+    log.print(`  status     ${result.status}`);
+    if (result.url) log.print(`  url        ${result.url}${result.ephemeral ? '   (ephemeral — see notes)' : ''}`);
+    if (result.service) log.print(`  service    ${result.service.kind} ${result.service.name}`);
+    if (result.blocked_by) log.print(`  blocked    ${result.blocked_by}`);
+    for (const note of result.notes || []) log.print(`  note       ${note}`);
+    if (result.status === 'planned') {
+      log.print('\n  Would run:');
+      for (const command of result.commands || []) log.print(`    ${command.cmd}`);
+      log.print('\n  Re-run with --yes to execute.');
+    }
+    for (const step of result.next || []) log.print(`  next       ${step}`);
+    log.print('');
+  },
+
+  /**
+   * The whole thing, in one command: host it, create the account, put the
+   * snippet in the site's source, then check it all works.
+   */
+  async up() {
+    const { deploy } = await import('../src/deploy.js');
+    const email = flags.email;
+    const domain = flags.domain;
+    if (!email || !domain) {
+      fail('Usage: credible up --email you@example.com --domain example.com [--target auto|local|tunnel|docker|fly] [--site-path .] [--json]');
+    }
+
+    const say = (message) => {
+      if (!flags.json) log.print(message);
+    };
+
+    say('\n① Hosting');
+    const hosted = await deploy({
+      target: flags.target || 'auto',
+      port: Number(flags.port || config.port),
+      dataDir: flags['data-dir'],
+      appName: flags['app-name'],
+      region: flags.region,
+      yes: Boolean(flags.yes),
+      onProgress: flags.json ? undefined : (step) => say(`  ${step.done ? '✓' : '…'} ${step.message}`),
+    });
+
+    if (hosted.status !== 'running') {
+      const payload = { step: 'deploy', ...hosted };
+      if (flags.json) log.print(JSON.stringify(payload, null, 2));
+      else {
+        say(`  ✗ ${hosted.blocked_by || 'could not start an instance'}`);
+        for (const note of hosted.notes || []) say(`    ${note}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+    say(`  ✓ running at ${hosted.url}`);
+
+    say('\n② Account and site');
+    const provisioned = await provisionOverHttp(hosted.url, {
+      email,
+      domain,
+      timezone: flags.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      currency: flags.currency || 'EUR',
+      password: flags.password,
+    });
+    say(`  ✓ ${provisioned.site.domain} · dashboard ${provisioned.dashboard_url}`);
+
+    let installed = null;
+    if (flags['site-path']) {
+      say('\n③ Snippet');
+      const { installSnippet, detectProject } = await import('../src/install.js');
+      const root = path.resolve(flags['site-path']);
+      const detected = detectProject(root);
+      installed = installSnippet({
+        root,
+        snippet: provisioned.snippet,
+        dryRun: Boolean(flags['dry-run']),
+        replacePlausible: Boolean(flags['replace-plausible']),
+      });
+      say(`  ✓ ${detected.framework}: ${installed.changed.map((c) => `${c.action} ${path.relative(root, c.file)}`).join(', ') || 'nothing to patch'}`);
+    }
+
+    if (flags.json) {
+      log.print(JSON.stringify({ deploy: hosted, provision: provisioned, install: installed }, null, 2));
+      return;
+    }
+
+    log.print('\n④ Done');
+    if (provisioned.password) log.print(`  password   ${provisioned.password}   ← shown once`);
+    log.print(`  api key    ${provisioned.api_key}   ← shown once`);
+    log.print(`  dashboard  ${provisioned.dashboard_url}`);
+    log.print('');
+    log.print(`  ${provisioned.snippet}`);
+    log.print('');
+    if (!flags['site-path']) log.print('  Put that tag in your <head>, or run:');
+    if (!flags['site-path']) log.print(`    credible install --domain ${provisioned.site.domain} --url ${hosted.url} --path .`);
+    log.print(`  Then check it: credible doctor --url ${hosted.url} --domain ${provisioned.site.domain} --api-key <key>`);
+    for (const note of hosted.notes || []) log.print(`  note       ${note}`);
+    log.print('');
+  },
+
   /** Everything an assistant needs, in one command. */
   async provision() {
     getDb();
@@ -254,6 +394,13 @@ const commands = {
   async help() {
     log.print(`credible <command>
 
+  up                       host it, create the account, install the snippet — everything
+                             --email you@example.com --domain example.com
+                             [--target auto|local|tunnel|docker|fly] [--site-path .] [--json]
+  deploy                   stand up a persistent instance
+                             [--target …] [--port …] [--detect] [--dry-run] [--yes] [--json]
+  doctor                   check an instance is usable and say what to fix
+                             [--url …] [--domain …] [--api-key …] [--json]
   serve                    start the HTTP server (default)
   provision                account + site + API key in one command
                              --email you@example.com [--domain example.com]
@@ -286,6 +433,39 @@ function csvCell(value) {
 /** Where this instance answers, for snippets and links printed by the CLI. */
 function instanceOrigin() {
   return (config.baseUrl || `http://localhost:${config.port}`).replace(/\/+$/, '');
+}
+
+/**
+ * Provision against a running instance over HTTP rather than in-process: `up`
+ * may have just deployed to Fly or Docker, where the database is not ours.
+ */
+async function provisionOverHttp(url, body) {
+  const response = await fetch(`${url.replace(/\/+$/, '')}/api/v1/provision`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `provisioning failed (${response.status})`);
+  return payload;
+}
+
+function formatEnvironment(environment) {
+  const mark = (value) => (value ? '✓' : '·');
+  const { tools } = environment;
+  return [
+    '',
+    `  platform   ${environment.platform} · node ${environment.node}`,
+    `  ${mark(tools.flyctl.available)} flyctl      ${tools.flyctl.available ? `${tools.flyctl.version}${tools.flyctl.authenticated ? ` (${tools.flyctl.account})` : ' — not logged in'}` : 'not installed'}`,
+    `  ${mark(tools.docker.available)} docker      ${tools.docker.available ? `${tools.docker.version}${tools.docker.running ? '' : ' — daemon not running'}` : 'not installed'}`,
+    `  ${mark(tools.cloudflared.available)} cloudflared ${tools.cloudflared.available ? tools.cloudflared.version : 'not installed'}`,
+    `  ${mark(tools.launchd.available || tools.systemd.available)} service     ${tools.launchd.available ? 'launchd' : tools.systemd.user ? 'systemd (user)' : 'none — the process will not survive a reboot'}`,
+    '',
+    `  recommended ${environment.recommended} — ${environment.reason}`,
+    ...(environment.notes || []).map((note) => `  note        ${note}`),
+    '',
+  ].join('\n');
 }
 
 function fail(message) {
