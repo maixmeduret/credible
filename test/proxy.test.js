@@ -45,6 +45,29 @@ const CLIENT_IP = {
   traefik: null, // Traefik sets X-Forwarded-* itself; there is nothing to configure
 };
 
+/**
+ * What proves the client's address cannot be *forged*, per server.
+ *
+ * X-Forwarded-For is an append-only header: nginx's $proxy_add_x_forwarded_for,
+ * Apache's mod_proxy_http and HAProxy's `option forwardfor` all add the real
+ * address to the END of whatever the client already sent. clientIp() in
+ * src/util/http.js reads the LEFTMOST entry, so on those three a visitor sending
+ * `X-Forwarded-For: 9.9.9.9` would choose their own country and visitor hash.
+ *
+ * Each server therefore has to pin one header it *sets* rather than appends.
+ * Verified against a live Apache 2.4: with only the append-style directives, a
+ * forged header arrives at the backend as "9.9.9.9, 127.0.0.1".
+ */
+const UNFORGEABLE = {
+  // header_up sets rather than appends; {remote_host} is the connection peer.
+  caddy: /header_up X-Forwarded-For \{remote_host\}/,
+  nginx: /proxy_set_header X-Real-IP\s+\$remote_addr;/,
+  apache: /RequestHeader set X-Real-IP "expr=%\{REMOTE_ADDR\}"/,
+  haproxy: /http-request set-header X-Real-IP %\[src\]/,
+  // Traefik drops incoming X-Forwarded-* unless the peer is in trustedIPs.
+  traefik: null,
+};
+
 /** What proves the original scheme reaches Credible, per server. */
 const CLIENT_PROTO = {
   caddy: /header_up X-Forwarded-Proto \{scheme\}/,
@@ -111,6 +134,12 @@ describe('every (server, mode) pair', () => {
         // And actually configured, wherever the server needs to be told.
         if (CLIENT_IP[server]) assert.match(active, CLIENT_IP[server]);
         if (CLIENT_PROTO[server]) assert.match(active, CLIENT_PROTO[server]);
+      });
+
+      it('pins an address a visitor cannot forge', () => {
+        // Presence of X-Forwarded-For is not enough: it is appended to, and
+        // Credible reads the leftmost entry. See UNFORGEABLE above.
+        if (UNFORGEABLE[server]) assert.match(active, UNFORGEABLE[server]);
       });
 
       it('ships the environment Credible needs, CREDIBLE_TRUST_PROXY first', () => {
@@ -242,6 +271,49 @@ describe('subpath mode never strips the prefix', () => {
     assert.match(active, /@credible path \/stats \/stats\/\*/);
     assert.ok(!active.includes('handle_path'), 'handle_path only appears in the explanation');
     assert.ok(config.includes('handle_path'), 'and the explanation is there');
+  });
+
+  it('caddy puts the Credible handle before the site catch-all', () => {
+    // handle blocks are mutually exclusive and the first match wins. Caddy only
+    // re-sorts them by path length when each carries exactly ONE path matcher;
+    // @credible carries two (/stats and /stats/*) and a site catch-all carries
+    // none, so neither is re-sorted and file order decides. A catch-all placed
+    // above would swallow /stats and Credible would never be reached — silently.
+    const { config } = proxyConfig({ server: 'caddy', mode: 'subpath', domain: DOMAIN });
+    const lines = config.split('\n');
+
+    const handleAt = lines.findIndex((line) => line.includes('handle @credible {'));
+    const siteAt = lines.findIndex((line) => /your existing site directives/.test(line));
+
+    assert.ok(handleAt > 0, 'the Credible handle is there');
+    assert.ok(siteAt > 0, 'the site directives are placed');
+    assert.ok(
+      handleAt < siteAt,
+      'the Credible handle is written before the site catch-all it must outrank',
+    );
+    assert.match(config, /go here, at the END/, 'and the reader is told why');
+  });
+
+  it('apache lists every module its directives need, mod_alias included', () => {
+    // Verified against a real Apache 2.4: drop mod_alias and the block dies with
+    // "Invalid command 'RedirectMatch'" — which fails httpd startup for the whole
+    // server, not just for Credible. mod_alias is default-enabled on Debian, so
+    // this is the module an author forgets and a minimal build then trips over.
+    const { config, notes } = proxyConfig({ server: 'apache', mode: 'subpath', domain: DOMAIN });
+    assert.match(config, /a2enmod proxy proxy_http remoteip headers alias/);
+    assert.match(directives(config), /RedirectMatch/, 'mod_alias is genuinely used');
+    assert.ok(
+      notes.some((note) => note.includes('a2enmod proxy proxy_http remoteip headers alias')),
+      'the notes agree with the block',
+    );
+
+    // Subdomain mode emits no RedirectMatch, so it must not demand mod_alias.
+    const sub = proxyConfig({ server: 'apache', mode: 'subdomain', domain: DOMAIN });
+    assert.ok(!directives(sub.config).includes('RedirectMatch'), 'nothing to redirect at a root');
+    assert.ok(
+      sub.notes.some((note) => /a2enmod proxy proxy_http remoteip headers(?! alias)/.test(note)),
+      'and asks only for what it uses',
+    );
   });
 
   it('apache keeps the prefix on both sides of the mapping', () => {

@@ -53,8 +53,9 @@ file. Scaling to two instances gives you two separate, half-empty databases.
 | **Cloudflare Pages / Workers** | Not a Node process, and no local disk at all — durable state means D1/KV/R2, not a file |
 | **GitHub Pages** | Static file hosting; there is no server to run anything on |
 | **AWS Lambda, Google Cloud Functions, Azure Functions** | No persistent process, and each invocation may land on a different sandbox with its own empty `/tmp` |
-| **Google Cloud Run and similar scale-to-zero container runtimes** | The container filesystem is ephemeral, and the network volumes offered instead are not safe for SQLite |
-| **Wix, Squarespace, Shopify, WordPress.com** | No server access at all — you get a CMS, not a machine |
+| **Google Cloud Run and similar scale-to-zero container runtimes** | The container filesystem is ephemeral and in-memory. You can pin a minimum instance, but the durable storage on offer is network-attached (GCS FUSE, NFS), and SQLite is not safe on either |
+| **Wix, Squarespace, Shopify** | No server access at all — you get a CMS, not a machine |
+| **WordPress.com** | A managed PHP host. Even the plans that grant SSH/WP-CLI give you a PHP application container, not somewhere to run a long-lived Node process |
 
 None of this stops you from *measuring* a site hosted on those platforms. It only means the
 instance has to live somewhere else.
@@ -138,6 +139,12 @@ lawful. See [PRIVACY.md](PRIVACY.md).
 dashboard is at `https://monsite.fr/stats`, ingestion at `https://monsite.fr/stats/api/event`,
 and the tracker at `https://monsite.fr/stats/js/cr.js`. Left empty (the default), everything
 sits at the root of the domain exactly as it does today.
+
+**`CREDIBLE_BASE_URL` is the origin, not the mount point.** Credible appends
+`CREDIBLE_BASE_PATH` to it itself, so the pair is `https://monsite.fr` + `/stats`. Setting the
+base URL to `https://monsite.fr/stats` as well produces `https://monsite.fr/stats/stats` in
+the install snippet and in every shared link — a mistake that only shows up later, in a URL
+somebody else clicks.
 
 The snippet needs no special attribute in either case:
 
@@ -253,15 +260,18 @@ On a real server, prefer the **system** unit in
 `loginctl enable-linger <user>` to survive logout at all.
 
 **2. Tell it where it lives.** `deploy --target local` bakes in a localhost base URL, because
-that is all it can know. Add these to the service file it wrote (or to the systemd unit from
-SELF-HOSTING.md) and restart:
+that is all it can know. Add these four variables to the service file it wrote (in the
+`[Service]` section of a systemd unit; inside the `EnvironmentVariables` dict if it wrote a
+launchd plist) and restart:
 
 ```ini
 Environment=CREDIBLE_BASE_PATH=/stats
-Environment=CREDIBLE_BASE_URL=https://monsite.fr/stats
+Environment=CREDIBLE_BASE_URL=https://monsite.fr
 Environment=CREDIBLE_TRUST_PROXY=true
 Environment=CREDIBLE_SECURE_COOKIES=true
 ```
+
+Again: the base URL is the origin. `/stats` is carried by `CREDIBLE_BASE_PATH` alone.
 
 > **`CREDIBLE_TRUST_PROXY=true` is mandatory behind a proxy.** Without it every event arrives
 > with the proxy's address: one country, one visitor, all day. With it — and *only* with a
@@ -271,43 +281,57 @@ Environment=CREDIBLE_SECURE_COOKIES=true
 > and visitor hash. [SELF-HOSTING.md](SELF-HOSTING.md#about-credible_trust_proxy) has both
 > failure modes in full.
 
-**3. Add the proxy block.** Ask Credible for it rather than writing it by hand — it knows the
-port and the base path it is actually running with:
+**3. Add the proxy block.** Ask Credible for it rather than writing it by hand — it emits the
+block, the environment variables that must match it, and the reload command:
 
 ```bash
-node bin/credible.js proxy-config
+node bin/credible.js proxy-config --domain monsite.fr --mode subpath --path /stats
 ```
 
-Paste the block it prints **inside your existing site's server block**, next to the rules that
-serve your pages. The shape, for orientation — take the real thing from the command:
+`--server` picks the syntax — `caddy`, `nginx`, `apache`, `traefik` or `haproxy`; without it
+Credible guesses from what is installed. `--mode subdomain` gives the `stats.monsite.fr`
+variant instead. `--json` returns the config, the env block and the notes as data.
+
+Paste what it prints **inside your existing site's server block**, next to the rules that serve
+your pages. The shape, for orientation — take the real thing, with its comments, from the
+command:
 
 ```caddy
 monsite.fr {
-	# … your existing site config …
+	# … your existing site directives, inside a handle block of their own …
 
-	handle /stats/* {
-		reverse_proxy 127.0.0.1:8000
+	@credible path /stats /stats/*
+	handle @credible {          # handle, never handle_path
+		reverse_proxy 127.0.0.1:8000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
 	}
 }
 ```
 
 ```nginx
 # inside the existing server { } block for monsite.fr
-location /stats/ {
+location ^~ /stats/ {
     proxy_pass http://127.0.0.1:8000;   # no trailing slash: the /stats prefix must survive
+    proxy_http_version 1.1;
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host  $host;
 }
+location = /stats { absolute_redirect off; return 301 /stats/; }
 ```
 
-Two details that bite people: the prefix must reach the app **unstripped** when
-`CREDIBLE_BASE_PATH` is set (in nginx, that means no trailing slash on `proxy_pass`; in Caddy,
-`handle`, not `handle_path`), and those forwarded headers are exactly what
-`CREDIBLE_TRUST_PROXY` reads. Reload the proxy afterwards — `sudo systemctl reload caddy`, or
-`sudo nginx -t && sudo systemctl reload nginx`.
+Three details that bite people. The prefix must reach the app **unstripped** when
+`CREDIBLE_BASE_PATH` is set: in nginx that means no trailing slash and no URI on `proxy_pass`,
+in Caddy it means `handle`, not `handle_path`. The `^~` matters too — without it a regex
+`location ~* \.(js|css)$` asset block wins over the prefix match and serves `/stats/js/cr.js`
+off the filesystem as a 404. And those forwarded headers are exactly what
+`CREDIBLE_TRUST_PROXY` reads. Reload afterwards — `caddy validate --config /etc/caddy/Caddyfile
+&& sudo systemctl reload caddy`, or `sudo nginx -t && sudo systemctl reload nginx`.
 
 **4. Check the whole chain.**
 

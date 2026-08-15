@@ -181,10 +181,13 @@ ${publicHost} {
   return `# /etc/caddy/Caddyfile — inside the site block that already serves ${site}.
 
 ${publicHost} {
-\t# … your existing site directives stay here. Keep them inside a handle block
-\t# of their own (\`handle { … }\` or \`handle /* { … }\`): handle blocks are
-\t# mutually exclusive, so Caddy picks exactly one and the two never compete
-\t# for a request.
+\t# ORDER MATTERS, and this block has to come first. handle blocks are mutually
+\t# exclusive and the first one that matches wins; Caddy only re-sorts them by
+\t# specificity when each carries a single path, which is not the case here (the
+\t# matcher below carries two, and a site's catch-all carries none). So a
+\t# \`handle { … }\` written above this one would swallow ${mount} as well and
+\t# Credible would never see a request — with no error anywhere to say so.
+\t# Your existing site directives go BELOW, at the bottom of this block.
 
 \t# The exact path plus everything under it. A bare \`handle ${mount}*\` would
 \t# also swallow a page of yours called ${mount}-old.
@@ -201,11 +204,18 @@ ${publicHost} {
 \thandle @credible {
 \t\treverse_proxy ${target} {
 \t\t\t# CREDIBLE_TRUST_PROXY=true is what makes Credible read these.
+\t\t\t# header_up sets rather than appends, and {remote_host} is the address
+\t\t\t# the connection came from, so a visitor sending their own
+\t\t\t# X-Forwarded-For cannot pick their own country or visitor hash.
 \t\t\theader_up X-Forwarded-For {remote_host}
 \t\t\theader_up X-Forwarded-Proto {scheme}
 \t\t\theader_up Host {host}
 \t\t}
 \t}
+
+\t# … your existing site directives go here, at the END, inside a handle block
+\t# of their own — \`handle { … }\` with no matcher is the catch-all. Being last
+\t# is what keeps it from shadowing the block above.
 }
 `;
 }
@@ -308,17 +318,31 @@ location = ${mount} {
 function apacheConfig(ctx) {
   const { publicHost, mount, targetUrl, site } = ctx;
 
-  const clientIp = `    # mod_proxy_http already appends the client's address to X-Forwarded-For on
-    # the way to Credible. X-Forwarded-Proto it does not send, so set it here.
+  const clientIp = `    # X-Forwarded-Proto is the one mod_proxy_http does not send on its own.
     RequestHeader set X-Forwarded-Proto "expr=%{REQUEST_SCHEME}"
 
-    # mod_remoteip matters when something else — a CDN, a load balancer — sits
-    # in FRONT of Apache: it says which upstreams are allowed to speak for the
-    # client. Trusting the header from everyone would let any visitor forge
-    # their own address and country, so the list starts at loopback and you add
-    # your CDN's ranges to it.
+    # mod_remoteip decides who is allowed to speak for the client. It matters
+    # when something else — a CDN, a load balancer — sits in FRONT of Apache.
+    # With an empty trust list mod_remoteip believes the header from anybody, so
+    # the list starts at loopback and you add your CDN's ranges to it.
     RemoteIPHeader X-Forwarded-For
-    RemoteIPInternalProxy 127.0.0.0/8 ::1`;
+    RemoteIPInternalProxy 127.0.0.0/8 ::1
+
+    # X-Real-IP, and why it is not redundant with the two lines above.
+    #
+    # mod_proxy_http APPENDS to X-Forwarded-For rather than replacing it, so a
+    # visitor who sends "X-Forwarded-For: 9.9.9.9" makes Credible receive
+    # "9.9.9.9, <their real address>". Credible reads the leftmost entry, which
+    # would let that visitor pick their own country and their own visitor hash.
+    # mod_remoteip does not close this: it corrects Apache's idea of the client,
+    # not the header Credible ends up parsing.
+    #
+    # X-Real-IP is set, not appended, so a forged one is overwritten, and
+    # %{REMOTE_ADDR} is the address mod_remoteip settled on just above — the
+    # real peer normally, the CDN-reported client when a trusted proxy is in
+    # front. Credible reads X-Real-IP in preference to X-Forwarded-For, so this
+    # is the line that decides who a visitor is.
+    RequestHeader set X-Real-IP "expr=%{REMOTE_ADDR}"`;
 
   if (ctx.mode === 'subdomain') {
     return `# /etc/apache2/sites-available/${publicHost}.conf — a new file.
@@ -356,10 +380,13 @@ ${clientIp}
 
   return `# /etc/apache2/sites-available/${site}.conf — inside the existing
 # <VirtualHost *:443> that serves https://${publicHost}.
-#   sudo a2enmod proxy proxy_http remoteip headers
+#   sudo a2enmod proxy proxy_http remoteip headers alias
 #
-# Without mod_proxy, mod_proxy_http, mod_remoteip and mod_headers these
-# directives fail to load. Enabling a module needs a restart, not a reload.
+# All five are required here: without them Apache refuses to start with
+# "Invalid command", which takes the whole site down and not just Credible.
+# mod_alias is the one people miss — it is what provides the RedirectMatch at
+# the bottom, and it is usually enabled already while the others are not.
+# Enabling a module needs a restart, not a reload.
 
     ProxyRequests Off        # a reverse proxy, never a forward proxy
     ProxyPreserveHost On     # Credible builds absolute links from the Host header
@@ -507,12 +534,21 @@ frontend https_in
     mode http
     http-request redirect scheme https unless { ssl_fc }
 
-    # HAProxy adds neither of these on its own, and passes the browser's Host
+    # HAProxy adds none of these on its own, and passes the browser's Host
     # header through untouched. CREDIBLE_TRUST_PROXY=true is what makes Credible
-    # read them; without the pair, every visitor collapses into one.
+    # read them; without them, every visitor collapses into one.
     option forwardfor        # this is HAProxy's spelling of "append X-Forwarded-For"
     http-request set-header X-Forwarded-Proto https if { ssl_fc }
     http-request set-header X-Forwarded-Proto http  unless { ssl_fc }
+
+    # APPEND is the operative word on the forwardfor line: a visitor who sends
+    # their own "X-Forwarded-For: 9.9.9.9" makes Credible receive
+    # "9.9.9.9, <their real address>", and Credible reads the leftmost entry —
+    # so that visitor would choose their own country and their own visitor hash.
+    # set-header replaces instead of appending, and %[src] is the address the
+    # connection actually came from, so this one cannot be forged. Credible
+    # reads X-Real-IP in preference to X-Forwarded-For, which is what closes it.
+    http-request set-header X-Real-IP %[src]
 
 ${frontendMatch}
     use_backend credible if credible_req
@@ -602,9 +638,12 @@ function notesFor(ctx) {
     );
   }
   if (server === 'apache') {
+    // RedirectMatch (mod_alias) is only emitted for a subpath mount.
+    const modules = `proxy proxy_http remoteip headers${mode === 'subpath' ? ' alias' : ''}`;
     notes.push(
-      'Enable the modules first — sudo a2enmod proxy proxy_http remoteip headers — ' +
-        'and restart Apache once (a reload does not load a new module).',
+      `Enable the modules first — sudo a2enmod ${modules} — and restart Apache once ` +
+        '(a reload does not load a new module). A missing one is a startup failure ' +
+        'for the whole server, not just for Credible.',
     );
   }
   if (server === 'traefik') {
