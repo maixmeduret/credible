@@ -11,7 +11,7 @@ services:
   credible:
     build: .
     # Or use a prebuilt image instead of building locally:
-    # image: ghcr.io/credible-analytics/credible:latest
+    # image: ghcr.io/maixmeduret/credible:latest
     container_name: credible
     restart: unless-stopped
     ports:

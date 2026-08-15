@@ -85,7 +85,7 @@ sudo useradd --system --create-home --home-dir /var/lib/credible --shell /usr/sb
 **3. Install the application:**
 
 ```bash
-sudo git clone https://github.com/credible-analytics/credible.git /opt/credible
+sudo git clone https://github.com/maixmeduret/credible.git /opt/credible
 sudo chown -R credible:credible /opt/credible
 sudo install -d -o credible -g credible -m 750 /var/lib/credible/data
 ```
@@ -106,7 +106,7 @@ Write `/etc/systemd/system/credible.service`:
 ```ini
 [Unit]
 Description=Credible — privacy-first web analytics
-Documentation=https://github.com/credible-analytics/credible
+Documentation=https://github.com/maixmeduret/credible
 After=network-online.target
 Wants=network-online.target
 
@@ -257,7 +257,7 @@ session cookie is only sent over HTTPS.
 ## Docker
 
 ```bash
-git clone https://github.com/credible-analytics/credible.git
+git clone https://github.com/maixmeduret/credible.git
 cd credible
 docker compose up -d
 docker compose logs -f credible     # the first-run account link

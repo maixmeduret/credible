@@ -49,7 +49,7 @@ const REFERRERS = [
   { url: 'https://www.linkedin.com/feed/', weight: 5 },
   { url: 'https://x.com/home', weight: 5 },
   { url: 'https://www.reddit.com/r/vosfinances/', weight: 4 },
-  { url: 'https://github.com/credible-analytics/credible', weight: 3 },
+  { url: 'https://github.com/maixmeduret/credible', weight: 3 },
   { url: 'https://chatgpt.com/', weight: 3 },
   { url: 'https://www.perplexity.ai/', weight: 2 },
   { url: 'https://www.producthunt.com/posts/credible', weight: 2 },

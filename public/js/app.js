@@ -151,7 +151,7 @@ function topbar() {
     right.appendChild(button);
   } else if (state.shared) {
     right.appendChild(
-      h('a', { class: 'btn ghost', href: 'https://github.com/credible-analytics/credible', target: '_blank', rel: 'noreferrer' }, 'Powered by Credible'),
+      h('a', { class: 'btn ghost', href: 'https://github.com/maixmeduret/credible', target: '_blank', rel: 'noreferrer' }, 'Powered by Credible'),
     );
   }
   bar.appendChild(right);

@@ -9,7 +9,7 @@ to test it, and the handful of rules that keep it the way it is.
 There is nothing to install.
 
 ```bash
-git clone https://github.com/credible-analytics/credible.git
+git clone https://github.com/maixmeduret/credible.git
 cd credible
 node bin/credible.js serve
 ```

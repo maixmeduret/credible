@@ -7,7 +7,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen.svg)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
-[![Tests](https://github.com/credible-analytics/credible/actions/workflows/ci.yml/badge.svg)](https://github.com/credible-analytics/credible/actions/workflows/ci.yml)
+[![Tests](https://github.com/maixmeduret/credible/actions/workflows/ci.yml/badge.svg)](https://github.com/maixmeduret/credible/actions/workflows/ci.yml)
 
 [Quickstart](#60-second-quickstart) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
 
@@ -54,7 +54,7 @@ Plausible or Matomo is a good place to land.
 ## 60-second quickstart
 
 ```bash
-git clone https://github.com/credible-analytics/credible.git
+git clone https://github.com/maixmeduret/credible.git
 cd credible
 node bin/credible.js serve
 ```
