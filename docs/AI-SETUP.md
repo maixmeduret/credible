@@ -13,10 +13,50 @@ responses are real output from a throwaway instance — yours will differ.
 
 ---
 
+## 0. The short version
+
+If the user has no instance yet, one command does everything in this document — hosting,
+account, site, and the snippet in their codebase:
+
+```bash
+git clone https://github.com/maixmeduret/credible.git && cd credible
+node bin/credible.js up --email them@example.com --domain example.com --site-path /path/to/their/site
+```
+
+It picks a hosting target, starts a service that survives a reboot, provisions the account,
+patches their layout file, and prints the API key, the password and the dashboard URL. Show
+the user the password and the key **once** — they are not recoverable.
+
+Check what it would pick first, and tell the user before you run anything that costs money:
+
+```bash
+node bin/credible.js deploy --detect
+```
+
+```
+  recommended tunnel — cloudflared is installed, so a public HTTPS URL is seconds away with
+              no account at all — but the hostname is ephemeral.
+```
+
+Targets: `local` (a launchd/systemd service on their machine), `tunnel` (adds a public HTTPS
+URL through cloudflared, no account, **ephemeral hostname**), `docker`, `fly` (a permanent
+public HTTPS URL; creates remote resources, so it refuses to run without `--yes`).
+
+The rest of this document is the same procedure step by step, for when you need to do it by
+hand or explain it.
+
+---
+
 ## 1. Decide where the instance runs
 
-Credible is one Node process and one SQLite file. Ask the user which of these they want; do
-not pick for them if a hosting bill or their own machine is involved.
+Credible is one Node process and one SQLite file. `credible up` picks for you; pick
+deliberately when a hosting bill or the user's own machine is involved.
+
+**The trap to avoid.** A public website is served over HTTPS, and a browser will not load a
+script over HTTP or from `localhost`. An instance on the user's laptop can only measure a
+site running on that same laptop. For a real, public site the instance needs a public HTTPS
+URL — `--target fly`, `--target tunnel`, or a VPS behind Caddy/nginx. `credible doctor` says
+so explicitly if you get this wrong.
 
 **A. Their machine or a VPS** — no build step, no `npm install`, nothing to install:
 
@@ -218,7 +258,28 @@ Deploy the site after installing. Nothing is recorded until the tag is live.
 
 ## 4. Verify data is arriving
 
-Ask the user to load a page on the deployed site, then:
+Run the diagnostic first — it checks the whole chain in one go and attaches a fix to
+anything that is wrong:
+
+```bash
+node bin/credible.js doctor --url https://INSTANCE --domain example.com --api-key "$CREDIBLE_API_KEY"
+```
+
+```
+  ✓ Instance reachable       https://INSTANCE · v0.1.0 · 1482 events stored
+  ✓ HTTPS                    https://INSTANCE
+  ✓ Tracker script           https://INSTANCE/js/cr.js (12.7 KB)
+  ✓ Event endpoint           https://INSTANCE/api/event accepts events
+  ! Site receiving data      example.com has never received an event
+      → Is the snippet in <head>? Is data-domain exactly "example.com"? Note that localhost
+        is not counted without data-track-localhost.
+```
+
+It exits non-zero when something is broken, and `--json` gives you the checks as structured
+data. The probe it sends to the event endpoint uses a domain nobody tracks, so running it
+never moves the user's numbers.
+
+Then ask the user to load a page on the deployed site, and confirm:
 
 ```bash
 curl -s -H "Authorization: Bearer $CREDIBLE_API_KEY" \

@@ -83,7 +83,29 @@ site? `node bin/credible.js seed` fills it with realistic demo traffic.
 ## Let an AI assistant set it up
 
 Credible is built to be driven by an agent, not just by a human clicking a
-dashboard. One call takes an instance from nothing to ready-to-install:
+dashboard. One command hosts it, creates the account, and puts the snippet in
+your codebase:
+
+```bash
+node bin/credible.js up --email you@example.com --domain yourdomain.com --site-path .
+```
+
+```
+① Hosting        ✓ running at http://localhost:8395
+② Account        ✓ yourdomain.com · dashboard http://localhost:8395/yourdomain.com
+③ Snippet        ✓ next-app: inserted app/layout.tsx
+④ Done           api key cred_…   ← shown once
+```
+
+It installs a service that survives a reboot (launchd on macOS, systemd on
+Linux), and picks a hosting target for you — run `credible deploy --detect` to
+see what it would choose. `--target fly` gives a permanent public HTTPS URL and
+refuses to create anything remote without `--yes`; `--target tunnel` gives a
+public HTTPS URL in seconds with no account at all, at the cost of an ephemeral
+hostname. When something is off, `credible doctor` names it and attaches the fix.
+
+Under the hood it is all HTTP, so an agent can drive each step on its own. One
+call takes an instance from nothing to ready-to-install:
 
 ```bash
 curl -X POST https://YOUR-INSTANCE/api/v1/provision \
@@ -213,6 +235,12 @@ The complete list, including the tuning and geo-database settings, is in
 ## Command line
 
 ```bash
+credible up                     # host it, provision, install the snippet — everything
+                                #   --email … --domain … [--target …] [--site-path .]
+credible deploy                 # stand up a persistent instance
+                                #   [--target auto|local|tunnel|docker|fly] [--detect] [--yes]
+credible doctor                 # check an instance is usable, and say what to fix
+                                #   [--url …] [--domain …] [--api-key …] [--json]
 credible serve                  # start the server (default command)
 credible provision              # account + site + API key in one command
                                 #   --email … [--domain …] [--timezone …] [--json]
