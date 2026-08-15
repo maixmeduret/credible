@@ -9,7 +9,7 @@
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 [![Tests](https://github.com/maixmeduret/credible/actions/workflows/ci.yml/badge.svg)](https://github.com/maixmeduret/credible/actions/workflows/ci.yml)
 
-[Quickstart](#60-second-quickstart) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
+[Quickstart](#60-second-quickstart) · [Tracking](docs/TRACKING.md) · [API](docs/API.md) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
 
 </div>
 
@@ -73,6 +73,9 @@ Then add your site in the dashboard and drop this in your page's `<head>`:
 ```html
 <script defer data-domain="yourdomain.com" src="https://YOUR-INSTANCE/js/cr.js"></script>
 ```
+
+Every option on that tag — SPA routing, path exclusions, outbound links, custom
+events, revenue — is documented in **[docs/TRACKING.md](docs/TRACKING.md)**.
 
 Numbers appear immediately. Want to see the dashboard populated before you wire up a real
 site? `node bin/credible.js seed` fills it with realistic demo traffic.
@@ -216,7 +219,8 @@ curl -H "Authorization: Bearer $CREDIBLE_API_KEY" \
 Alongside `aggregate` there are `timeseries`, `breakdown`, and `realtime/visitors`. There is
 also an events API (`POST /api/v1/events`), so you can record conversions from your backend —
 a completed payment, a signup confirmed by webhook — without trusting the browser to report
-them.
+them. Every endpoint, metric, dimension and filter operator is in
+**[docs/API.md](docs/API.md)**.
 
 ## Roadmap
 

@@ -82,8 +82,10 @@ Send it as a bearer token:
 Authorization: Bearer cred_E4PNaUAmHnAlUhmJOpVmK45RQWMc33gNvGCdgXQteoc
 ```
 
-The prefix is matched case-insensitively (`/^Bearer\s+/i`) and the rest is
-trimmed. Anything else — no header, a `Basic` header, an unknown key — is a 401:
+The prefix is stripped case-insensitively (`/^Bearer\s+/i`) and the remainder is
+trimmed, so a bare `Authorization: cred_…` with no `Bearer` prefix also
+authenticates. Anything else — no header, a `Basic` header, an unknown key — is
+a 401:
 
 ```json
 {"error":"Provide a valid API key: Authorization: Bearer <key>"}
@@ -551,7 +553,7 @@ inside `filters`.
 | `visit:exit_page` | Exit page | Path of the visit's last pageview. Session-scoped. |
 | `visit:channel` | Channel | One of `Direct`, `Organic Search`, `Paid Search`, `Organic Social`, `Paid Social`, `Organic Video`, `Organic Shopping`, `Paid Shopping`, `Email`, `Affiliates`, `Referral`, `Display`, `SMS`, `Audio`, `Unknown`. |
 | `visit:source` | Source | Friendly source name (`Google`, `Hacker News`, `X (Twitter)`, `Direct`…), derived from the referrer or from `utm_source`. |
-| `visit:referrer` | Referrer | Referrer as classified at ingest — the host, or a fuller reference for known referrers. Not the raw URL in every case. |
+| `visit:referrer` | Referrer | The referrer reduced to `host + path`, with the scheme, `www.`, query string, fragment and trailing slashes removed: `https://news.ycombinator.com/item?id=1` is stored as `news.ycombinator.com/item`. Empty for direct traffic and for referrers on the site's own domain. |
 | `visit:utm_source` | UTM source | `utm_source` from the landing URL. |
 | `visit:utm_medium` | UTM medium | `utm_medium`. |
 | `visit:utm_campaign` | UTM campaign | `utm_campaign`. |
@@ -579,8 +581,9 @@ session, inherited from its first event), not storage.
 - As `property`: returns the goal breakdown described in §2.4.
 - In `filters`: values are matched against each goal's `display_name`, falling
   back to `event_name` then `page_path`, and expand to the goal's own definition
-  (an event-name match, or a path match with an optional trailing `*`). Values
-  that match no configured goal make the filter match nothing.
+  (an event-name match, or a path match with an optional trailing `*`). If no
+  value matches a configured goal the filter matches **nothing** — including
+  `event:goal` with `is_not`, which returns zero rows rather than everything.
 
 **`event:props:<key>`** — a custom property, read out of the event's JSON blob
 with `json_extract`. The key must be non-empty and ≤ 64 characters; double
@@ -908,7 +911,7 @@ verified here; check against your Plausible version before relying on it.
 | **Filter syntax** | **JSON only**: `[["is","visit:country",["FR"]]]`. The Plausible v1 string syntax (`visit:source==Google;event:page==/blog`, `!=`, `*` wildcards, `\|` alternation) is **rejected** with `{"error":"filters must be valid JSON"}`. This is the single biggest incompatibility. |
 | **Filter operators** | Exactly six: `is`, `is_not`, `contains`, `contains_not`, `matches`, `matches_not`. No `matches_wildcard`, no `has_done`, no `and`/`or`/`not` combinators, no nesting. |
 | **Custom date range** | `period=custom&from=YYYY-MM-DD&to=YYYY-MM-DD`. The Plausible form `date=YYYY-MM-DD,YYYY-MM-DD` is **not** parsed — it is ignored and the request silently falls back to `30d`. |
-| **`timeseries` metrics** | One metric per request. A comma-separated list produces a single key literally named `"a,b"` holding the first metric's… actually, the *visitors* values. Call the endpoint once per metric. |
+| **`timeseries` metrics** | One metric per request. A comma-separated list produces a single key literally named `"a,b"` whose value is the *visitors* count, because no bucket field has that name. Call the endpoint once per metric. |
 | **Period list** | `realtime`, `day`, `yesterday`, `7d`, `28d`, `30d`, `91d`, `month`, `last_month`, `6mo`, `12mo`, `year`, `all`, `custom`. Unrecognised values fall back to `30d` instead of erroring. |
 | **Pagination** | `limit` + `page` as in Plausible, but no total count and no `has_more` in the v1 response. `event:goal` ignores both. |
 | **`event:goal` rows** | `{id, name, type, uniques, total, revenue, cr}` — not Plausible's `visitors`/`events`/`conversion_rate` naming. |
