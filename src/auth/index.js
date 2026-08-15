@@ -53,6 +53,15 @@ export function normalizeEmail(email) {
 }
 
 const token = () => crypto.randomBytes(32).toString('base64url');
+
+/** A readable, strong password for accounts created without one. */
+export function randomPassword(length = 16) {
+  const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i += 1) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
 const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
 
 // ----------------------------------------------------------------- users --
@@ -119,17 +128,24 @@ export function destroyAuthSession(value) {
   if (value) run('DELETE FROM auth_sessions WHERE token = ?', [value]);
 }
 
-/** The signed-in user for a request, or null. */
+/**
+ * The user behind a request, or null.
+ *
+ * Two ways in, checked in this order: the dashboard's session cookie, then an
+ * `Authorization: Bearer cred_…` API key. Accepting keys here is what makes the
+ * whole management API scriptable — an assistant can create sites, goals and
+ * shared links without ever driving the UI.
+ */
 export function currentUser(req) {
   const value = parseCookies(req)[SESSION_COOKIE];
-  if (!value) return null;
-  const session = get('SELECT * FROM auth_sessions WHERE token = ?', [value]);
-  if (!session) return null;
-  if (session.expires_at < now()) {
-    destroyAuthSession(value);
-    return null;
+  if (value) {
+    const session = get('SELECT * FROM auth_sessions WHERE token = ?', [value]);
+    if (session) {
+      if (session.expires_at >= now()) return findUser(session.user_id) || null;
+      destroyAuthSession(value);
+    }
   }
-  return findUser(session.user_id) || null;
+  return userFromApiKey(req.headers.authorization);
 }
 
 export function requireUser(req) {

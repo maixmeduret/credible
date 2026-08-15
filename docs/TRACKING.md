@@ -55,7 +55,8 @@ Notes on placement:
   — which means you need a proxy on your own domain. See [`data-api`](#data-api).
 - The tracker file is served with `access-control-allow-origin: *` and
   `cache-control: public, max-age=86400, must-revalidate` (see `serveStatic()` in
-  `src/server.js`), so you can put a CDN in front of it without configuring anything.
+  `src/server.js`), so you can put a CDN in front of it without configuring anything. A
+  development instance (`CREDIBLE_DEV=1`) sends `no-store` for every asset instead.
 
 ### You do not need the script at all
 
@@ -131,8 +132,8 @@ domain, which is the reliable way around content blockers that filter requests b
 <script
   defer
   data-domain="example.com"
-  data-api="https://example.com/_stats/event"
-  src="https://example.com/_stats/cr.js"
+  data-api="https://example.com/_stats/api/event"
+  src="https://example.com/_stats/js/cr.js"
 ></script>
 ```
 
@@ -157,8 +158,9 @@ example.com {
 }
 ```
 
-With that in place, `data-api="https://example.com/_stats/api/event"` and
-`src="https://example.com/_stats/js/cr.js"` both go through your own domain.
+`handle_path` strips the `/_stats` prefix, so those two URLs reach Credible as `/api/event` and
+`/js/cr.js` — both on your own domain. Keep the `/js/` segment: the tracker is only served from
+`/js/cr.js`, and a request for `/cr.js` falls through to the dashboard's HTML shell.
 
 > **Set `CREDIBLE_TRUST_PROXY=true` on the instance when you proxy.** The visitor hash and the
 > per-site IP exclusions are computed from the client IP (`clientIp()` in `src/util/http.js`).
@@ -269,8 +271,9 @@ development page.
 <script defer data-domain="example.com" data-track-localhost src="http://localhost:8000/js/cr.js"></script>
 ```
 
-"Local" means the page hostname matches
-`^(localhost|127.0.0.1|0.0.0.0|[::1])$` or ends in `.localhost`, case-insensitively.
+"Local" means the page hostname is `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` or `[::1]`, or
+ends in `.localhost`. The test is one case-insensitive regular expression:
+`/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)$|\.localhost$/i`.
 
 Two things this flag does **not** override:
 
@@ -765,11 +768,19 @@ newlines or commas):
 /preview/**
 ```
 
-The rules are the same as [`data-exclude`](#data-exclude): `*` within a segment, `**` across
-segments, anchored at both ends (`pathMatches()` in `src/sites.js`). The difference is where
-they run — these are checked at ingest, against the normalised pathname, after the request has
-already been sent. Use `data-exclude` when you want the beacon never to leave the browser, and
-this list when you want to change the rule without redeploying the site.
+`*` matches within a segment, `**` across segments, anchored at both ends — the same dialect as
+[`data-exclude`](#data-exclude), but a separate implementation (`pathMatches()` in
+`src/sites.js`), and two details differ from the browser-side list:
+
+- A pattern is used exactly as written, so it **must start with `/`**. No leading slash is added
+  for you, and `admin/*` therefore matches nothing.
+- `?` is **not** escaped here, so it acts as a regular-expression quantifier rather than a
+  literal character.
+
+Trailing slashes never come up, because the pathname has already been normalised when the match
+runs. The bigger difference is where these run — at ingest, against the normalised pathname,
+after the request has already been sent. Use `data-exclude` when you want the beacon never to
+leave the browser, and this list when you want to change the rule without redeploying the site.
 
 ### 4. Excluded IP addresses (per site, server side)
 
@@ -938,8 +949,13 @@ curl -s https://stats.example.com/api/v1/events \
   -H 'Content-Type: application/json' \
   -d '{"n":"pageview","d":"example.com","u":"https://example.com/pricing","w":1440,
        "user_agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36"}'
-# {"status":"ignored","reason":"unknown domain"}
-# {"status":"ok","events":1}
+```
+
+The answer is one of these two — a rejection still comes back `200`, only a write is `202`:
+
+```
+202  {"status":"ok","events":1}
+200  {"status":"ignored","reason":"unknown domain"}
 ```
 
 See [docs/API.md](API.md) for that endpoint in full.
@@ -951,7 +967,7 @@ See [docs/API.md](API.md) for that endpoint in full.
 | Pageviews double on every route change | A router calling `pushState` *and* `replaceState` with different URLs. Only identical URLs are deduplicated |
 | An SPA reports far more pageviews than expected | Query-string changes are separate URLs. The path is what is stored, but every `pushState` to a new URL is a pageview |
 | Outbound clicks are missing on one link | The link has no `href`, or the host equals `location.host` — subdomains count as outbound, the same host on a different path does not |
-| A download link is not counted | The extension is not in the [list](#file-downloads), or it is followed by a query string in the path portion |
+| A download link is not counted | The extension is not in the [list](#file-downloads), or it only appears in the query string — only the path is matched, so `/report.pdf?v=2` counts and `/download?file=report.pdf` does not |
 | Engagement events never arrive | They need both a tracked pageview and non-zero visible time; a tab that is hidden from the start accumulates nothing |
 | Visitor counts look far too low | Bot filtering is deliberately strict — a User-Agent with no browser marker is treated as a bot |
 | Every visitor collapses into one | Behind a proxy without `CREDIBLE_TRUST_PROXY=true`, all events share the proxy's IP |

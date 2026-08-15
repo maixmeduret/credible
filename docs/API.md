@@ -161,7 +161,7 @@ computed in the **site's** timezone.
 | `last_month` | the whole calendar month before the anchor's month | `day` |
 | `6mo` | start of the month 5 months back → end of anchor day | `month` |
 | `12mo` | start of the month 11 months back → end of anchor day | `month` |
-| `year` | 1 January of the anchor's year → end of anchor day | `month` |
+| `year` | 1 January of the anchor's year → the earlier of 1 January next year and the end of the anchor day (so a past year returns the whole year) | `month` |
 | `all` | the site's **first recorded event** (start of that day) → end of anchor day. With no data at all, the last 30 days. | recomputed by span |
 | `custom` | `from` 00:00 → `to` 24:00 | recomputed by span |
 
@@ -309,9 +309,12 @@ curl -s -H "Authorization: Bearer $CREDIBLE_KEY" \
 ```
 
 Every row carries the value **twice**: once under the property name (Plausible
-style) and once as `name` (the internal field). Rows are ordered by `visitors`
-descending, then `pageviews` descending, then `name` ascending. Empty and NULL
-values are excluded.
+style) and once as `name` (the internal field). Empty and NULL values are
+excluded. Ordering depends on the shape: `event:page` and the ordinary event
+dimensions sort by `visitors` descending, then `pageviews` descending, then
+`name` ascending, while `visit:entry_page`, `visit:exit_page` and
+`event:props:<key>` sort by `visitors` descending, then `name` ascending, with
+no `pageviews` tie-break.
 
 **The columns depend on the dimension.** There are four shapes:
 
@@ -445,9 +448,9 @@ are listed.
 | `p` | `props` | object | no | Custom properties. Flat object only: max 30 keys, keys ≤ 64 chars, values coerced to strings and capped at 255 chars. Nested objects, arrays and `null` values are dropped; booleans become `"true"`/`"false"`; empty keys and empty values are dropped. |
 | `v` | `revenue` | object | no | `{"amount": <number>, "currency": "EUR"}` (`a`/`c` also accepted). Stored as integer minor units (`round(amount × 100)`). The currency must be exactly three letters or it is stored empty; when omitted it defaults to the site's currency. A non-numeric `amount` disables revenue for the event. |
 | `e` | — | object | no | Engagement: `{"t": <ms>, "s": <percent>}`. `t` is clamped to 0…1 800 000 ms, `s` to 0…100. Only meaningful on `engagement` events — this is what feeds `time_on_page` and `scroll_depth`. |
-| `ip` | — | string | no | **Server-side only.** Overrides the source IP used for geolocation and for the daily visitor hash. Falls back to the request's client IP. The IP is never stored. |
+| `ip` | — | string | no | **Server-side only.** Overrides the source IP used for the daily visitor hash and for geolocation. Falls back to the request's client IP. The IP is never stored. Note that an IP only produces a country when `CREDIBLE_GEO_DB` points at a country CSV: with no geo database the country comes from the CDN's edge headers on the request and this field affects the visitor hash alone. |
 | `user_agent` | — | string | no | **Server-side only.** Overrides the `User-Agent` header for browser/OS/device parsing and bot detection. Max 500 chars. |
-| `timestamp` | — | number | no | **Server-side only.** Unix **seconds** for the event. `Math.floor(Number(...))` — no validation, no range check, so a bad value writes a bogus row. Defaults to now. |
+| `timestamp` | — | number | no | **Server-side only.** Unix **seconds** for the event. `Math.floor(Number(...))`, and any falsy result — `NaN` from a non-numeric value, or `0` — silently falls back to now. A value that *is* a number is never range-checked, so sending milliseconds writes a row dated tens of thousands of years in the future. Defaults to now. |
 
 #### When an event is dropped
 
@@ -461,12 +464,17 @@ reasons, in the order they are checked:
 | `invalid url` | `u` does not parse |
 | `unsupported scheme` | `u` is not `http:`/`https:` |
 | `missing data-domain` | `d`/`domain` absent or empty |
-| `unknown domain` | none of the listed domains is tracked on this instance |
+| `unknown domain` | no event was written for any listed domain — either none of them is tracked on this instance, or every tracked one skipped the event because the path matches its `excluded_paths` or the effective IP is in its `excluded_ips` |
 
-**Bot detection catches command-line clients.** `isBot()` requires the
-User-Agent to contain a browser marker (`mozilla/`, `applewebkit`, `gecko/`,
-`opera/`, `webkit/`, `trident/`, `msie `). A default `curl/8.x` or a Node
-`fetch` User-Agent has none of them, so the event is silently dropped as a bot:
+**Bot detection catches command-line clients.** `isBot()` drops a User-Agent for
+either of two reasons. It matches an automation marker outright — `curl`,
+`wget`, `python-requests`, `axios`, `node-fetch`, `undici`, `okhttp`,
+`go-http-client`, `postmanruntime` and the rest of `BOT_PATTERNS` in
+`src/ingest/bots.js` are all listed there — or it contains none of the browser
+build tokens (`mozilla/`, `applewebkit`, `gecko/`, `opera/`, `webkit/`,
+`trident/`, `msie `), which is what catches HTTP clients that are not on the
+list. A default `curl/8.x` User-Agent trips both rules, so the event is silently
+dropped as a bot:
 
 ```bash
 # no user_agent field, curl's own UA → dropped
@@ -497,8 +505,10 @@ Two more caveats worth knowing:
 `POST /api/event` (aliases `/api/events` and `/event`) is the same pipeline
 without authentication — it is what the browser tracker posts to. It accepts the
 `n`/`d`/`u`/`r`/`w`/`h`/`p`/`v`/`e` fields only (no `ip`, `user_agent` or
-`timestamp`), always answers **202 with an empty body**, and reports the outcome
-in an `x-credible` response header (`ok` or `ignored`). CORS is open
+`timestamp`), answers **202 with an empty body** for everything it accepts —
+written or ignored alike — and reports the outcome in an `x-credible` response
+header (`ok` or `ignored`). The only other statuses it can return are the 400
+below and the 429 in [Rate limits](#7-rate-limits). CORS is open
 (`access-control-allow-origin` echoes the request `Origin`, or `*`). A malformed
 JSON body there is a 400 `{"error":"Invalid payload"}`; anything else that goes
 wrong is swallowed so the endpoint never leaks internals.
@@ -559,7 +569,7 @@ inside `filters`.
 | `visit:utm_campaign` | UTM campaign | `utm_campaign`. |
 | `visit:utm_content` | UTM content | `utm_content`. |
 | `visit:utm_term` | UTM term | `utm_term`. |
-| `visit:country` | Country | **ISO 3166-1 alpha-2 code**, uppercase (`FR`, `US`), not a country name. Empty when geography is unavailable. |
+| `visit:country` | Country | **ISO 3166-1 alpha-2 code**, uppercase (`FR`, `US`), not a country name. Read from the CDN's edge headers, or from the optional `CREDIBLE_GEO_DB` country CSV. Empty when neither is available, and for the `XX`/`T1` (Tor, unknown) codes. |
 | `visit:region` | Region | Region name as supplied by the edge headers. Often empty. |
 | `visit:city` | City | City name as supplied by the edge headers. Often empty. |
 | `visit:browser` | Browser | `Chrome`, `Safari`, `Firefox`, … |
@@ -586,10 +596,13 @@ session, inherited from its first event), not storage.
   `event:goal` with `is_not`, which returns zero rows rather than everything.
 
 **`event:props:<key>`** — a custom property, read out of the event's JSON blob
-with `json_extract`. The key must be non-empty and ≤ 64 characters; double
-quotes are stripped from it. Works as a `property` and inside `filters`.
-Property keys are not declared anywhere in advance — they appear as soon as an
-event carries them.
+with `json_extract`. Double quotes are stripped from the key. Works as a
+`property` and inside `filters`, but the two paths validate differently: inside
+`filters` the key must be non-empty and ≤ 64 characters or the request is a 422
+(`Invalid property: …`), while as a `property` it is passed straight to
+`json_extract` unchecked, so an empty or over-long key is simply a 200 with
+`{"results":[]}`. Property keys are not declared anywhere in advance — they
+appear as soon as an event carries them.
 
 ---
 

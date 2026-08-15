@@ -56,6 +56,7 @@ import {
   suggestGoals,
 } from './goals.js';
 import { recordEvent } from './ingest/index.js';
+import { nextSteps, provision } from './provision.js';
 import {
   Scope,
   aggregate,
@@ -86,6 +87,7 @@ import {
   readJson,
   sendJson,
   sendNoContent,
+  sendText,
   serializeCookie,
 } from './util/http.js';
 import { log } from './util/log.js';
@@ -585,6 +587,43 @@ export function registerRoutes() {
     sendJson(res, 200, currentVisitors(site.id));
   });
 
+  /**
+   * Zero-touch setup: one call takes an instance from nothing to "ready to
+   * install", and hands back the API key needed for everything after.
+   *
+   * This is the endpoint an AI assistant calls first. It is deliberately
+   * idempotent-ish: pointing it at an account that already exists (with its
+   * password, or a Bearer key) just adds the site and mints a fresh key.
+   */
+  route('POST', '/api/v1/provision', async ({ req, res }) => {
+    if (!takeAuth(clientIp(req))) throw new HttpError(429, 'Too many attempts, try again in a minute');
+    const body = await readJson(req);
+
+    const result = provision({
+      email: body.email,
+      password: body.password,
+      name: body.name,
+      domain: body.domain,
+      timezone: body.timezone || 'UTC',
+      currency: body.currency || 'EUR',
+      keyName: body.key_name,
+      user: userFromApiKey(req.headers.authorization),
+    });
+
+    const origin = originFor(req);
+    sendJson(res, 201, {
+      user: publicUser(result.user),
+      password: result.password,
+      api_key: result.apiKey,
+      site: result.site ? publicSite(result.site) : null,
+      snippet: result.site ? snippetFor(req, result.site) : null,
+      instance_url: origin,
+      dashboard_url: result.site ? `${origin}/${result.site.domain}` : origin,
+      created: result.created,
+      next_steps: nextSteps(origin, result.site),
+    });
+  });
+
   /** Server-side event tracking (mobile apps, backends, webhooks). */
   route('POST', '/api/v1/events', async ({ req, res }) => {
     apiUser(req);
@@ -596,6 +635,18 @@ export function registerRoutes() {
       timestamp: body.timestamp ? Math.floor(Number(body.timestamp)) : undefined,
     });
     sendJson(res, result.status === 'ok' ? 202 : 200, result);
+  });
+
+  // ------------------------------------------------------- agent brief --
+
+  /**
+   * A machine-readable "how to drive this instance" note, with this instance's
+   * real origin baked in. An assistant can fetch it and get to work.
+   */
+  route('GET', '/llms.txt', ({ req, res }) => {
+    const origin = originFor(req);
+    const open = config.openRegistration || userCount() === 0;
+    sendText(res, 200, agentBrief(origin, open), { 'cache-control': 'no-cache' });
   });
 
   // ---------------------------------------------------------- SPA shell --
@@ -618,6 +669,68 @@ function requireOwnedSite(req, domain, role) {
   if (!site) throw new HttpError(404, 'Site not found');
   if (!canAccess(user, site, role)) throw new HttpError(403, 'You do not have access to this site');
   return { user, site };
+}
+
+/** The text served at /llms.txt. Kept short enough to paste into a prompt. */
+function agentBrief(origin, registrationOpen) {
+  return `# Credible — ${origin}
+
+Privacy-first web analytics. Everything below is doable over HTTP; the dashboard
+is optional. Docs: https://github.com/maixmeduret/credible/blob/main/docs/AI-SETUP.md
+
+## 1. Set up in one call${registrationOpen ? '' : '  (registration is CLOSED — you need an existing API key)'}
+
+curl -X POST ${origin}/api/v1/provision \\
+  -H 'content-type: application/json' \\
+  -d '{"email":"you@example.com","domain":"example.com","timezone":"Europe/Paris"}'
+
+Returns: api_key (use it for everything after), password (show it to the user
+once, it is not recoverable), snippet, dashboard_url.
+
+## 2. Install
+
+Put the returned snippet in the <head> of every page:
+<script defer data-domain="example.com" src="${origin}/js/cr.js"></script>
+
+Options on that tag: data-hash, data-exclude, data-api, data-respect-dnt,
+data-track-localhost (localhost is NOT counted without it), data-debug.
+
+## 3. Verify
+
+curl -H "Authorization: Bearer <key>" ${origin}/api/stats/example.com/realtime
+
+## 4. Manage (all take Authorization: Bearer <key>)
+
+POST   ${origin}/api/sites                          {"domain":"…","timezone":"…"}
+GET    ${origin}/api/sites/example.com              site, goals, funnels, snippet
+PATCH  ${origin}/api/sites/example.com              {"timezone":"…","excluded_paths":"/admin/*"}
+POST   ${origin}/api/sites/example.com/goals        {"type":"event","event_name":"Signup"}
+POST   ${origin}/api/sites/example.com/funnels      {"name":"…","goals":[1,2,3]}
+POST   ${origin}/api/sites/example.com/shared-links {"name":"…"} -> public read-only URL
+
+## 5. Read the numbers
+
+GET ${origin}/api/v1/stats/aggregate?site_id=example.com&period=30d&metrics=visitors,pageviews,bounce_rate
+GET ${origin}/api/v1/stats/breakdown?site_id=example.com&property=visit:source&period=7d
+GET ${origin}/api/v1/stats/timeseries?site_id=example.com&period=30d
+GET ${origin}/api/v1/stats/realtime/visitors?site_id=example.com
+
+Periods: realtime day yesterday 7d 28d 30d 91d month last_month 6mo 12mo year all custom
+Dimensions: event:page event:name event:goal event:props:<key> visit:channel visit:source
+visit:referrer visit:utm_* visit:entry_page visit:exit_page visit:country visit:region
+visit:city visit:browser visit:os visit:device visit:screen_size
+Filters: ?filters=[["is","visit:country",["FR"]]]  (URL-encoded JSON)
+
+## 6. Record an event server-side
+
+POST ${origin}/api/v1/events  {"n":"Purchase","d":"example.com","u":"https://example.com/thanks","v":{"amount":39,"currency":"EUR"}}
+
+## Rules for you, the assistant
+
+- Never paste the API key or the password into a shared channel or commit them to a repo.
+- Ask before making a dashboard public (POST /api/sites/:domain shared-links or "public": true).
+- No cookies are set on visitors, so no consent banner is needed. Do not add one.
+`;
 }
 
 /**
