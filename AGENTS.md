@@ -40,7 +40,7 @@ unix-second ranges; visitor identity is a **daily-rotating hash** with no user t
 ```bash
 node bin/credible.js serve                  # http://localhost:8000, creates ./data/credible.db
 npm run dev                                 # same, with --watch and debug logging
-node bin/credible.js seed example.com --days 30 --visitors 40   # realistic demo traffic
+node bin/credible.js seed --days 30 --visitors 40   # demo traffic for demo.credible.dev
 node bin/credible.js provision --email you@example.com --domain example.com --json
 node bin/credible.js install --domain example.com --path ../their-site --dry-run
 node bin/credible.js site:list
@@ -49,11 +49,16 @@ node bin/credible.js help
 ```
 
 Requires **Node ≥ 22.13** (`node:sqlite` without a flag). Never run a throwaway experiment
-against `./data` — point it elsewhere:
+against `./data` — every command above reads `CREDIBLE_DATA_DIR`, so point them elsewhere:
 
 ```bash
 CREDIBLE_DATA_DIR=/tmp/credible-scratch CREDIBLE_PORT=8331 node bin/credible.js serve
+CREDIBLE_DATA_DIR=/tmp/credible-scratch node bin/credible.js seed example.com --days 30
 ```
+
+`seed` and `provision` write to the database of whichever `CREDIBLE_DATA_DIR` is in scope, and
+there is **no `site:delete` CLI command** — undoing a stray seed means
+`DELETE /api/sites/<domain>` with the owner's key, or throwing the scratch directory away.
 
 ## Test it
 

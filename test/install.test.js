@@ -489,6 +489,34 @@ describe('installSnippet', () => {
     assert.ok(layout.indexOf('<Script') < layout.indexOf('</body>'), 'the component belongs inside <body>');
   });
 
+  it('puts the next/script import after a multi-line import block', () => {
+    const layout = `'use client';
+import {
+  Inter,
+  Roboto,
+} from 'next/font/google';
+import './globals.css';
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+      </body>
+    </html>
+  );
+}
+`;
+    const root = nextTree(layout);
+    install({ root });
+    const lines = read(root, 'app/layout.tsx').split('\n');
+
+    assert.equal(lines[6], "import Script from 'next/script';");
+    assert.equal(lines[5], "import './globals.css';");
+    // Still valid: the multi-line import was not cut in half.
+    assert.equal(lines.slice(1, 5).join('\n'), "import {\n  Inter,\n  Roboto,\n} from 'next/font/google';");
+  });
+
   it('registers the tracker in a Nuxt config that still parses', async () => {
     const root = tree({ 'nuxt.config.mjs': 'export default defineNuxtConfig({\n  devtools: { enabled: true },\n});\n' });
     const result = install({ root });
@@ -506,6 +534,39 @@ describe('installSnippet', () => {
     // Idempotent, and a second entry is never appended.
     const again = install({ root });
     assert.equal(again.changed[0].action, 'unchanged');
+  });
+
+  it('handles every shape of Nuxt config', async () => {
+    const variants = {
+      bare: 'export default defineNuxtConfig({\n  devtools: { enabled: true },\n});\n',
+      emptyScriptArray: 'export default defineNuxtConfig({\n  app: {\n    head: {\n      title: "Shop",\n      script: [],\n    },\n  },\n});\n',
+      populatedScriptArray:
+        'export default defineNuxtConfig({\n  app: {\n    head: {\n      script: [\n        { src: "https://cdn.example/other.js" },\n      ],\n    },\n  },\n});\n',
+      headWithoutScript: 'export default defineNuxtConfig({\n  app: {\n    head: {\n      title: "Shop",\n    },\n  },\n});\n',
+      appWithoutHead: 'export default defineNuxtConfig({\n  app: {\n    baseURL: "/",\n  },\n});\n',
+    };
+
+    globalThis.defineNuxtConfig = (value) => value;
+    let version = 100;
+    for (const [name, source] of Object.entries(variants)) {
+      const root = tree({ 'nuxt.config.mjs': source });
+      const file = path.join(root, 'nuxt.config.mjs');
+
+      assert.equal(install({ root }).changed[0].action, 'inserted', name);
+      const module_ = await import(`${pathToFileURL(file).href}?v=${version++}`);
+      const scripts = module_.default.app.head.script;
+      assert.equal(scripts.filter((entry) => entry.src.includes('/js/cr.js')).length, 1, `one entry for ${name}`);
+      assert.equal(install({ root }).changed[0].action, 'unchanged', `idempotent for ${name}`);
+
+      uninstallSnippet({ root });
+      assert.ok(!read(root, 'nuxt.config.mjs').includes('cr.js'), `uninstall for ${name}`);
+    }
+
+    // Existing entries survive.
+    const kept = tree({ 'nuxt.config.mjs': variants.populatedScriptArray });
+    install({ root: kept });
+    const module_ = await import(`${pathToFileURL(path.join(kept, 'nuxt.config.mjs')).href}?v=${version}`);
+    assert.equal(module_.default.app.head.script.length, 2);
   });
 
   it('is idempotent', () => {
@@ -538,6 +599,7 @@ describe('installSnippet', () => {
     assert.equal(content.match(/\/js\/cr\.js/g).length, 1, 'exactly one Credible tag survives');
     assert.match(result.changed[0].diff, /^-.*analytics\.example\.com/m);
     assert.match(result.changed[0].diff, /^\+.*stats\.example\.org/m);
+    assert.match(result.notes.join('\n'), /Updated the Credible tag already in index\.html/);
   });
 
   it('replaces a tag whose domain changed', () => {
@@ -548,6 +610,91 @@ describe('installSnippet', () => {
 
     assert.equal(result.changed[0].action, 'replaced');
     assert.ok(read(root, 'index.html').includes(other));
+  });
+
+  // data-api, data-hash, data-exclude, data-respect-dnt, data-track-localhost and
+  // data-debug all change what the tracker does. A tag whose src happens to be
+  // right but whose options are stale is not "already installed".
+  it('refreshes a tag whose tracker options changed', () => {
+    const root = htmlTree();
+    install({ root });
+
+    const withOptions = SNIPPET.replace('<script defer', '<script defer data-track-localhost data-hash="true"');
+    const result = installSnippet({ root, snippet: withOptions });
+
+    assert.equal(result.changed[0].action, 'replaced');
+    const content = read(root, 'index.html');
+    assert.ok(content.includes(withOptions), 'the file holds the snippet that was asked for');
+    assert.equal(content.match(/\/js\/cr\.js/g).length, 1, 'exactly one Credible tag survives');
+    assert.match(result.notes.join('\n'), /attributes did not match/);
+
+    const again = installSnippet({ root, snippet: withOptions });
+    assert.ok(again.changed.every((entry) => entry.action === 'unchanged'), 'and then it settles');
+  });
+
+  it('drops a tracker option the snippet no longer carries', () => {
+    const root = htmlTree();
+    installSnippet({ root, snippet: SNIPPET.replace('<script defer', '<script defer data-debug') });
+    assert.ok(read(root, 'index.html').includes('data-debug'));
+
+    const result = installSnippet({ root, snippet: SNIPPET });
+    assert.equal(result.changed[0].action, 'replaced');
+    assert.ok(!read(root, 'index.html').includes('data-debug'));
+  });
+
+  it('does not rewrite a tag that only spells a boolean attribute differently', () => {
+    const spelled = SNIPPET.replace('<script defer', '<script defer=""');
+    const root = htmlTree({ 'index.html': HTML_PAGE.replace('  </head>', `    ${spelled}\n  </head>`) });
+
+    const result = install({ root });
+    const entry = result.changed.find((item) => item.file.endsWith('index.html'));
+
+    assert.equal(entry.action, 'unchanged');
+    assert.ok(read(root, 'index.html').includes(spelled), 'the file is left byte for byte alone');
+  });
+
+  it('refreshes a next/script tag without duplicating the import', () => {
+    const root = nextTree(NEXT_LAYOUT_NO_HEAD);
+    install({ root });
+
+    const withOptions = SNIPPET.replace('<script defer', '<script defer data-exclude="/admin/*"');
+    const result = installSnippet({ root, snippet: withOptions });
+
+    assert.equal(result.changed[0].action, 'replaced');
+    const content = read(root, 'app/layout.tsx');
+    assert.ok(content.includes('data-exclude="/admin/*"'));
+    assert.equal(content.match(/<Script\b/g).length, 1, 'exactly one Script component');
+    assert.equal(content.match(/next\/script/g).length, 1, 'exactly one next/script import');
+    assert.equal(installSnippet({ root, snippet: withOptions }).changed[0].action, 'unchanged');
+  });
+
+  it('refreshes a Nuxt entry whose tracker options changed', async () => {
+    globalThis.defineNuxtConfig = (value) => value;
+    const root = tree({ 'nuxt.config.mjs': 'export default defineNuxtConfig({\n  devtools: { enabled: true },\n});\n' });
+    install({ root });
+
+    const withOptions = SNIPPET.replace('<script defer', '<script defer data-hash="true"');
+    assert.equal(installSnippet({ root, snippet: withOptions }).changed[0].action, 'replaced');
+
+    const module_ = await import(`${pathToFileURL(path.join(root, 'nuxt.config.mjs')).href}?v=700`);
+    const scripts = module_.default.app.head.script;
+    assert.equal(scripts.length, 1, 'the stale entry was replaced, not doubled');
+    assert.equal(scripts[0]['data-hash'], 'true');
+    assert.equal(installSnippet({ root, snippet: withOptions }).changed[0].action, 'unchanged');
+  });
+
+  it('refuses to rewrite a Nuxt entry that shares its line with other config', () => {
+    const source =
+      'export default defineNuxtConfig({\n' +
+      '  app: { head: { script: [{ defer: true, src: "https://analytics.example.com/js/cr.js" }] } },\n' +
+      '});\n';
+    const root = tree({ 'nuxt.config.mjs': source });
+
+    const result = installSnippet({ root, snippet: SNIPPET.replace('<script defer', '<script defer data-debug') });
+
+    assert.equal(result.changed[0].action, 'unchanged');
+    assert.equal(read(root, 'nuxt.config.mjs'), source, 'the surrounding config is not deleted');
+    assert.match(result.notes.join('\n'), /holds other configuration/);
   });
 
   it('leaves a Plausible tag alone by default and explains itself', () => {

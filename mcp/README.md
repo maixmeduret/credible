@@ -26,7 +26,7 @@ written against Node built-ins only.
 claude mcp add credible \
   --env CREDIBLE_URL=https://analytics.example.com \
   --env CREDIBLE_API_KEY=cred_your_key_here \
-  -- node /Users/maxime/Documents/Credible/mcp/server.js
+  -- node /path/to/credible/mcp/server.js
 ```
 
 Swap the path for wherever you cloned the repo, and `CREDIBLE_URL` for your instance's origin.
@@ -38,7 +38,7 @@ rest of the session:
 ```bash
 claude mcp add credible \
   --env CREDIBLE_URL=http://localhost:8000 \
-  -- node /Users/maxime/Documents/Credible/mcp/server.js
+  -- node /path/to/credible/mcp/server.js
 ```
 
 Check it registered with `claude mcp list`, and see the tools in a session with `/mcp`.
@@ -52,7 +52,7 @@ Add this to the client's `mcpServers` config file:
   "mcpServers": {
     "credible": {
       "command": "node",
-      "args": ["/Users/maxime/Documents/Credible/mcp/server.js"],
+      "args": ["/path/to/credible/mcp/server.js"],
       "env": {
         "CREDIBLE_URL": "http://localhost:8000",
         "CREDIBLE_API_KEY": ""
@@ -166,33 +166,32 @@ Check, in this order:
 Fix, reload a page, then call credible_verify_install again.
 ```
 
-The build had not been deployed yet — that is the point of checking. After a deploy and one page
+The build had not been deployed yet — that is the point of checking. After the deploy and one page
 load, the same call answers:
 
 ```
 YES — acme.dev is receiving data.
 
-First event   2026-07-17 00:38:21 UTC (4 weeks ago)
-Latest event  2026-08-15 21:24:37 UTC (0 seconds ago)
-Right now     2 visitors on the site
-Today         378 visitors, 725 pageviews
+First event   2026-08-15 21:17:54 UTC (0 seconds ago)
+Latest event  2026-08-15 21:17:54 UTC (0 seconds ago)
+Right now     1 visitor on the site
+Today         1 visitor, 1 pageview
 Dashboard     http://localhost:8000/acme.dev
 
 Pages being viewed right now
    1. / — 1 visitor
-   2. /auth/sign-up — 1 visitor
-   3. /listings — 1 visitor
-   4. /pricing — 1 visitor
 ```
 
-**5. Now it can answer questions about the traffic.**
+Setup is done, and it was checked rather than assumed.
+
+**5. A week later, it answers questions about the traffic.**
 
 > **You:** How did last week go?
 
 `credible_get_stats { "domain": "acme.dev", "period": "7d", "comparison": "previous_period" }`
 
 ```
-acme.dev — 7d (2026-08-08 to 2026-08-15, Europe/Paris)
+acme.dev — 7d (2026-08-09 to 2026-08-15, Europe/Paris)
 
 Visitors        1,461   (+28%)
 Visits          2,029   (+37%)

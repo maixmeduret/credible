@@ -246,6 +246,23 @@ function timeAgo(unixSeconds) {
 const isoStamp = (unixSeconds) =>
   unixSeconds ? new Date(Number(unixSeconds) * 1000).toISOString().replace('.000', '').replace('T', ' ').slice(0, 19) + ' UTC' : '';
 
+/**
+ * 'YYYY-MM-DD' for an instant, read in the site's own timezone.
+ *
+ * A period's boundaries come back as the unix seconds of local midnight, so
+ * rendering them in UTC names the wrong day for every site that is not on UTC:
+ * "today" in Europe/Paris starts at 22:00 UTC the day before. An unusable
+ * timezone falls back to UTC rather than throwing.
+ */
+function localDate(unixSeconds, timeZone = 'UTC') {
+  const at = new Date(Number(unixSeconds) * 1000);
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: timeZone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+  } catch {
+    return at.toISOString().slice(0, 10);
+  }
+}
+
 /** '+12%' / '-4%' / 'no change' */
 function changeLabel(value) {
   if (value === null || value === undefined) return '';
@@ -419,7 +436,13 @@ async function provision(args) {
 
   const domain = data.site?.domain || optionalString(args, 'domain') || '';
   const instanceUrl = normalizeBase(data.instance_url || base);
-  if (data.api_key) session.keys.set(instanceUrl, data.api_key);
+  if (data.api_key) {
+    // Remembered under both the URL we dialled and the origin the instance
+    // reports for itself: behind a reverse proxy (CREDIBLE_BASE_URL) they
+    // differ, and later calls dial the first one.
+    session.keys.set(base, data.api_key);
+    session.keys.set(instanceUrl, data.api_key);
+  }
 
   const created = data.created || {};
   const lines = [
@@ -511,16 +534,29 @@ async function provisionByHand(args, base, existingKey) {
     snippet = response.json?.snippet || snippetFor(base, domain);
   }
 
+  // The legacy endpoints never report the instance's own origin, but the
+  // snippet they build carries it — and behind a reverse proxy it is not the
+  // URL we dialled. Follow the snippet, so the origin in the reply, the
+  // dashboard link and the script tag can never disagree with each other. This
+  // is what /api/v1/provision does for itself with `instance_url`.
+  const origin = originOfSnippet(snippet) || base;
+
   return {
     user,
     password: createdUser && !suppliedPassword ? password : null,
     api_key: apiKey,
     site,
     snippet,
-    instance_url: base,
-    dashboard_url: site ? `${base}/${site.domain}` : null,
+    instance_url: origin,
+    dashboard_url: site ? `${origin}/${site.domain}` : null,
     created: { user: createdUser, site: Boolean(site) },
   };
+}
+
+/** The origin a returned snippet loads the tracker from, or '' if unreadable. */
+function originOfSnippet(snippet) {
+  const match = /\bsrc="(https?:\/\/[^"]+)\/js\/cr\.js"/i.exec(String(snippet || ''));
+  return match ? normalizeBase(match[1]) : '';
 }
 
 // ------------------------------------------------------------------ tools --
@@ -548,7 +584,7 @@ const PERIOD_PROP = {
   type: 'string',
   enum: PERIODS,
   description:
-    'Time range to report on. "day" is today, "7d"/"28d"/"30d"/"91d" are trailing windows, "month"/"last_month"/"year" are calendar periods, "all" is everything ever recorded, "realtime" is the last 30 minutes, "custom" requires from and to. Defaults to 7d.',
+    'Time range to report on. "day" is today, "7d"/"28d"/"30d"/"91d" are trailing windows, "month"/"last_month"/"year" are calendar periods, "all" is everything ever recorded, "custom" requires from and to. "realtime" is the live window — credible_get_stats switches to the who-is-on-the-site-now view (last 5 minutes), credible_breakdown ranks the last 30 minutes. Defaults to 7d.',
 };
 
 const RANGE_PROPS = {
@@ -612,7 +648,7 @@ const TOOLS = [
       }
       const rows = sites.map((site) => [
         site.domain,
-        `${fmt(site.current_visitors || 0)} visitors right now · ${site.timezone} · ${site.currency}${site.public ? ' · public dashboard' : ''}`,
+        `${count(site.current_visitors || 0, 'visitor')} right now · ${site.timezone} · ${site.currency}${site.public ? ' · public dashboard' : ''}`,
       ]);
       return `${sites.length} site${sites.length === 1 ? '' : 's'} on ${baseUrl(args)}\n\n${block(rows)}`;
     },
@@ -791,7 +827,8 @@ const TOOLS = [
       const range = data.period || {};
       const panels = data.panels || {};
 
-      const header = `${domain} — ${period}${range.start ? ` (${isoStamp(range.start).slice(0, 10)} to ${isoStamp(range.end - 1).slice(0, 10)}, ${range.timezone || 'UTC'})` : ''}`;
+      const zone = range.timezone || 'UTC';
+      const header = `${domain} — ${period}${range.start ? ` (${localDate(range.start, zone)} to ${localDate(range.end - 1, zone)}, ${zone})` : ''}`;
 
       const parts = [
         header,
@@ -937,9 +974,9 @@ const TOOLS = [
           ? `The site must send this event for it to convert: credible_track_event, or in the browser \`window.credible('${goal.event_name}')\`.`
           : 'It converts automatically whenever a visitor reaches that path.',
         `Use goal id ${goal.id} when building a funnel.`,
-      ]
-        .filter(Boolean)
-        .join('\n');
+        // No .filter() here: block() always renders the Type row, and the empty
+        // string above is the deliberate blank line before the advice.
+      ].join('\n');
     },
   },
 

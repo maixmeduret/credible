@@ -124,6 +124,30 @@ function analyticsLabel(tag) {
   return host || (src ? src.split('/').pop() : 'an inline analytics script');
 }
 
+/** `defer` and `defer=""` are the same attribute; they must not read as a diff. */
+const flagValue = (value) => (value === '' ? true : value);
+
+/** The tag we are about to write, parsed the way tags found in a file are. */
+function describeTag(tagText) {
+  const [tag] = findScriptTags(tagText);
+  return tag ?? { attrs: parseAttributes(tagText).attrs, inner: '' };
+}
+
+/**
+ * Is the tag already in the file the one we would write?
+ *
+ * Every attribute counts, not just src and data-domain: data-api, data-hash,
+ * data-exclude, data-respect-dnt, data-track-localhost and data-debug each
+ * change what the tracker does, so a tag missing one is stale and gets
+ * rewritten rather than silently reported as already installed.
+ */
+function sameTag(existing, desired) {
+  for (const name of new Set([...Object.keys(existing.attrs), ...Object.keys(desired.attrs)])) {
+    if (flagValue(existing.attrs[name]) !== flagValue(desired.attrs[name])) return false;
+  }
+  return existing.inner.trim() === desired.inner.trim();
+}
+
 // ------------------------------------------------------------------ snippet --
 
 /**
@@ -406,9 +430,19 @@ function nextScriptImport(ctx) {
   const quote = /from\s+"/.test(ctx.text) && !/from\s+'/.test(ctx.text) ? '"' : "'";
   const semicolon = /^import\b.*;\s*$/m.test(ctx.text) || !/^import\b/m.test(ctx.text) ? ';' : '';
   const statement = `import Script from ${quote}next/script${quote}${semicolon}`;
+
+  // The last line an import *ends* on — a multi-line `import { … } from 'x'`
+  // must never be split in half.
   let after = -1;
+  let open = false;
   for (let i = 0; i < ctx.lines.length && i < 80; i++) {
-    if (/^\s*import\b/.test(ctx.lines[i])) after = i;
+    const line = ctx.lines[i];
+    if (/^\s*import\b/.test(line)) open = true;
+    if (!open) continue;
+    if (/(from\s+['"][^'"]+['"]|^\s*import\s+['"][^'"]+['"])\s*;?\s*$/.test(line)) {
+      after = i;
+      open = false;
+    }
   }
   if (after < 0) {
     // Keep a leading 'use client' / 'use server' directive first.
@@ -443,7 +477,17 @@ function planNuxtConfig(ctx, parsed) {
 
   if (existing >= 0) {
     const line = ctx.lines[existing];
-    if (line.includes(quoteJs(parsed.src)) && (!parsed.domain || line.includes(quoteJs(parsed.domain)))) {
+    // Compare against the entry we would write, so one that is missing
+    // data-track-localhost or data-api counts as stale even though its src is right.
+    const bare = line.trim().replace(/,\s*$/, '');
+    if (bare === entry) return { action: 'unchanged', edits: [], notes };
+    if (!/^\{[\s\S]*\}$/.test(bare)) {
+      // The tracker shares its line with other configuration; replacing the
+      // whole line would delete that configuration with it.
+      notes.push(
+        `${ctx.rel} line ${existing + 1} already mentions the tracker but holds other configuration ` +
+          `on the same line. Replace that entry with ${entry} by hand.`,
+      );
       return { action: 'unchanged', edits: [], notes };
     }
     const indent = leadingSpace(line);
@@ -508,14 +552,20 @@ function planMarkup(ctx, parsed, strategy, { replacePlausible }) {
 
   const tags = findScriptTags(ctx.text);
   const credible = tags.filter((tag) => tag.kind === 'credible');
+  const desired = describeTag(tagText);
 
   if (credible.length) {
     const [first, ...duplicates] = credible;
-    const same =
-      first.attrs.src === parsed.src &&
-      (typeof first.attrs['data-domain'] === 'string' ? first.attrs['data-domain'] : '') === parsed.domain;
+    const same = sameTag(first, desired);
     const edits = [];
-    if (!same) edits.push(replaceRange(ctx, first.start, first.end, tagText));
+    if (!same) {
+      edits.push(replaceRange(ctx, first.start, first.end, tagText));
+      notes.push(
+        first.attrs.src === parsed.src
+          ? `Updated the Credible tag already in ${ctx.rel}: its attributes did not match the snippet.`
+          : `Updated the Credible tag already in ${ctx.rel}: it pointed at ${first.attrs.src}.`,
+      );
+    }
     for (const duplicate of duplicates) edits.push(removeRange(ctx, duplicate.start, duplicate.end));
     if (duplicates.length) notes.push(`Removed ${duplicates.length} duplicate Credible tag(s) from ${ctx.rel}.`);
     if (!edits.length) return { action: 'unchanged', edits, notes };
@@ -577,6 +627,9 @@ function planRemoval(ctx, strategy) {
       if (CREDIBLE_ANYWHERE.test(ctx.lines[i])) {
         edits.unshift({ start: i, deleteCount: 1, insert: [] });
       }
+    }
+    if (edits.length) {
+      notes.push(`Removed the tracker from ${ctx.rel}; the empty app.head.script scaffolding is left in place.`);
     }
     return { action: edits.length ? 'replaced' : 'unchanged', edits, notes };
   }

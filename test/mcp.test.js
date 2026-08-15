@@ -15,6 +15,7 @@ import { closeDatabase, withDatabase } from './helpers.js';
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import net from 'node:net';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
@@ -338,6 +339,31 @@ describe('tools/call against a real instance', () => {
     const breakdown = await client.call('credible_breakdown', { domain: DOMAIN, dimension: 'event:page' });
     assert.equal(breakdown.isError, false, breakdown.text);
     assert.match(breakdown.text, /\/pricing/);
+
+    // One visitor is "1 visitor", never "1 visitors".
+    const sites = await client.call('credible_list_sites');
+    assert.equal(sites.isError, false, sites.text);
+    assert.match(sites.text, /1 visitor right now/);
+  });
+
+  it('names the reported range in the site timezone, not in UTC', async () => {
+    // The API returns a period as the unix seconds of local midnight. Rendering
+    // those in UTC names the day before for any site east of Greenwich — this
+    // site is Europe/Paris, where "today" starts at 22:00 UTC yesterday.
+    const { text, isError } = await client.call('credible_get_stats', { domain: DOMAIN, period: 'day' });
+    assert.equal(isError, false, text);
+
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Paris',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+
+    assert.ok(
+      text.startsWith(`${DOMAIN} — day (${today} to ${today}, Europe/Paris)`),
+      `the header must name one Paris day, got: ${text.split('\n')[0]}`,
+    );
   });
 
   it('normalizes a domain typed as a URL', async () => {
@@ -354,6 +380,7 @@ describe('tools/call against a real instance', () => {
     });
     assert.equal(signup.isError, false, signup.text);
     const [, firstId] = signup.text.match(/Goal #(\d+)/);
+    assert.match(signup.text, /Event name\s+Signup\n\nThe site must send/, 'the detail block and the advice must stay apart');
 
     const thanks = await client.call('credible_create_goal', {
       domain: DOMAIN,
@@ -376,6 +403,101 @@ describe('tools/call against a real instance', () => {
     const { text, isError } = await client.call('credible_share_dashboard', { domain: DOMAIN, name: 'Client' });
     assert.equal(isError, false, text);
     assert.match(text, new RegExp(`${origin}/share/${DOMAIN}\\?auth=`));
+  });
+});
+
+// ------------------------------------------------------- legacy instances --
+
+/**
+ * A stand-in for a Credible older than `/api/v1/provision`: that one route
+ * 404s, everything else is forwarded to the real instance. The upstream sees
+ * its own Host, so it reports its own origin — which is also what a reverse
+ * proxy without CREDIBLE_BASE_URL looks like.
+ */
+function startLegacyProxy(upstream) {
+  const server = http.createServer(async (req, res) => {
+    if (req.url.startsWith('/api/v1/provision')) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers['content-length'];
+
+    const response = await fetch(`${upstream}${req.url}`, {
+      method: req.method,
+      headers,
+      body: chunks.length ? Buffer.concat(chunks) : undefined,
+      redirect: 'manual',
+    });
+
+    const out = {};
+    response.headers.forEach((value, key) => {
+      if (!['content-encoding', 'content-length', 'set-cookie'].includes(key)) out[key] = value;
+    });
+    const cookies = response.headers.getSetCookie?.() || [];
+    if (cookies.length) out['set-cookie'] = cookies;
+    res.writeHead(response.status, out);
+    res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  return server;
+}
+
+describe('an instance older than /api/v1/provision', () => {
+  let proxy;
+  let legacyOrigin;
+
+  before(async () => {
+    proxy = startLegacyProxy(origin);
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+    legacyOrigin = `http://127.0.0.1:${proxy.address().port}`;
+  });
+
+  after(async () => {
+    proxy.closeAllConnections?.();
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+
+  it('provisions anyway, by composing register + key + site', async () => {
+    const { text, isError } = await client.call('credible_provision', {
+      instance_url: legacyOrigin,
+      email: 'legacy@example.com',
+      domain: 'legacy.example',
+      timezone: 'Europe/Paris',
+    });
+
+    assert.equal(isError, false, text);
+    assert.match(text, /cred_[A-Za-z0-9_-]+/, 'the composed path must still mint a key');
+    assert.match(text, /legacy\.example \(Europe\/Paris, EUR\)/);
+    const [, key] = text.match(/(cred_[A-Za-z0-9_-]+)/);
+
+    // Really provisioned: the key opens the account, and the site is there.
+    const response = await fetch(`${origin}/api/sites`, { headers: { authorization: `Bearer ${key}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(
+      body.sites.map((site) => site.domain),
+      ['legacy.example'],
+    );
+  });
+
+  it('never contradicts itself about where the instance lives', async () => {
+    // This upstream reports its own origin rather than the proxy's, so the
+    // snippet, the dashboard link and the header must all follow the snippet
+    // rather than each picking a different one.
+    const { text, isError } = await client.call('credible_provision', {
+      instance_url: legacyOrigin,
+      email: 'legacy2@example.com',
+      domain: 'legacy2.example',
+    });
+    assert.equal(isError, false, text);
+
+    const [, snippetOrigin] = text.match(/src="(https?:\/\/[^"]+)\/js\/cr\.js"/);
+    assert.ok(text.includes(`Credible is ready at ${snippetOrigin}`), `header must name ${snippetOrigin}: ${text}`);
+    assert.ok(text.includes(`${snippetOrigin}/legacy2.example`), `dashboard link must name ${snippetOrigin}: ${text}`);
   });
 });
 

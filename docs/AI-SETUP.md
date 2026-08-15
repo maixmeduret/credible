@@ -82,7 +82,11 @@ Exact 201 response:
   "instance_url": "https://INSTANCE",
   "dashboard_url": "https://INSTANCE/example.com",
   "created": { "user": true, "site": true },
-  "next_steps": ["…"]
+  "next_steps": [
+    "Put the snippet in the <head> of every page you want to measure.",
+    "Confirm it works: GET https://INSTANCE/api/stats/example.com/realtime",
+    "Keep api_key secret — it can read and change everything in this account."
+  ]
 }
 ```
 
@@ -91,7 +95,8 @@ absent), `name`, `domain` (omit to create only the account — `site` and `snipp
 `null`), `timezone` (IANA, default `UTC`), `currency` (3 letters, default `EUR`), `key_name`.
 
 **Adding a site to an account that already exists** — send the existing key instead of a
-password; `password` comes back `null` and `created.user` is `false`:
+password; `password` comes back `null`, `created.user` is `false`, and a *fresh* `api_key` is
+minted for the call (the key you sent keeps working — you do not have to switch to the new one):
 
 ```bash
 curl -s -X POST https://INSTANCE/api/v1/provision \
@@ -266,7 +271,8 @@ Every call below takes `Authorization: Bearer $CREDIBLE_API_KEY`. Nothing here n
 dashboard.
 
 ```bash
-# See everything about a site: settings, goals, funnels, shared links, members, snippet
+# Everything about a site: settings, goals, funnels, shared_links, members, snippet,
+# suggested_goals (event names already arriving) and data_range (first/last event)
 curl -s -H "Authorization: Bearer $CREDIBLE_API_KEY" https://INSTANCE/api/sites/example.com
 
 # Timezone, excluded paths and IPs, currency  (PATCH, any subset)
@@ -274,7 +280,7 @@ curl -s -X PATCH https://INSTANCE/api/sites/example.com \
   -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
   -d '{"timezone":"Europe/Paris","excluded_paths":"/admin/**, /preview/*","excluded_ips":"203.0.113.7"}'
 
-# A goal on a custom event  ->  {"goal":{"id":1,"type":"event","event_name":"Signup",…}}
+# A goal on a custom event  ->  {"goal":{"id":1,"site_id":1,"type":"event","event_name":"Signup",…}}
 curl -s -X POST https://INSTANCE/api/sites/example.com/goals \
   -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
   -d '{"type":"event","event_name":"Signup"}'
@@ -399,7 +405,7 @@ Both drive the same API.
 | --- | --- | --- |
 | `403 Registration is closed on this instance` | `CREDIBLE_OPEN_REGISTRATION=false` and no Bearer key | Get an API key from the user, or run `credible provision` on the host |
 | `409 That domain is already tracked by another account` | Domain taken on this instance | Use another domain, or the account that owns it |
-| `401 Provide a valid API key` | Missing/wrong `Authorization` header | `Authorization: Bearer cred_…`; keys are shown once and unrecoverable |
+| `401 Provide a valid API key: Authorization: Bearer <key>` on `/api/v1/…`, `401 Sign in to continue` on `/api/sites/…` | Missing or wrong `Authorization` header | `Authorization: Bearer cred_…`; keys are shown once and unrecoverable |
 | `404 Site not found` with a valid key | The key's owner is not a member of that site | Deliberate — a key cannot discover other accounts' sites |
 | Realtime shows 0 after installing | localhost, blocker, wrong `data-domain`, or the site is not deployed | §4, in that order |
 | `{"status":"ignored","reason":"bot"}` | curl's own User-Agent | Send an explicit browser `user_agent` |
@@ -410,7 +416,7 @@ Both drive the same API.
 | Numbers exist but no conversions | The event is never sent, or the goal's name does not match it exactly | Goals match at query time, so the definition is what is wrong: compare with `suggested_goals`, and check the site calls `credible('Signup')` |
 | `credible install` says "No place to put the snippet was found" | Detection recognised the project but could not patch a file | Re-run with `--file path/to/layout`, one command per file, or paste the tag in by hand |
 | Dashboard link 404s | Wrong origin — snippets and links use `CREDIBLE_BASE_URL` | Set `CREDIBLE_BASE_URL` to the public origin and restart |
-| `node:sqlite` errors on startup | Node older than 22.13 | Upgrade Node, or start with `node --experimental-sqlite` on 22.5–22.12 |
+| `node:sqlite` errors on startup | Node older than 22.13 | Upgrade Node. 22.13 is the floor because `node:sqlite` stopped needing a flag there — [SELF-HOSTING.md](SELF-HOSTING.md) |
 
 More depth: [TRACKING.md §10](TRACKING.md#10-troubleshooting) for the browser side,
 [API.md §6](API.md#6-errors) for the HTTP side.
