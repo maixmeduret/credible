@@ -9,7 +9,7 @@
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 [![Tests](https://github.com/maixmeduret/credible/actions/workflows/ci.yml/badge.svg)](https://github.com/maixmeduret/credible/actions/workflows/ci.yml)
 
-[Quickstart](#60-second-quickstart) · [Tracking](docs/TRACKING.md) · [API](docs/API.md) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
+[Quickstart](#60-second-quickstart) · [AI setup](docs/AI-SETUP.md) · [Tracking](docs/TRACKING.md) · [API](docs/API.md) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
 
 </div>
 
@@ -79,6 +79,40 @@ events, revenue — is documented in **[docs/TRACKING.md](docs/TRACKING.md)**.
 
 Numbers appear immediately. Want to see the dashboard populated before you wire up a real
 site? `node bin/credible.js seed` fills it with realistic demo traffic.
+
+## Let an AI assistant set it up
+
+Credible is built to be driven by an agent, not just by a human clicking a
+dashboard. One call takes an instance from nothing to ready-to-install:
+
+```bash
+curl -X POST https://YOUR-INSTANCE/api/v1/provision \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","domain":"yourdomain.com","timezone":"Europe/Paris"}'
+```
+
+It returns the account, an **API key that authenticates the entire management
+API** (sites, goals, funnels, shared links, stats), and the exact snippet to
+install. The same thing locally: `node bin/credible.js provision --email … --domain … --json`.
+
+Then let it patch your codebase — it detects Next.js, Astro, Nuxt, SvelteKit,
+Vite, Hugo, Jekyll, Rails, Django, Laravel, WordPress themes and plain HTML:
+
+```bash
+node bin/credible.js install --domain yourdomain.com --url https://YOUR-INSTANCE --dry-run
+```
+
+For an assistant that will keep answering questions about your traffic, register
+the **[MCP server](mcp/README.md)** — twelve tools covering provisioning,
+installation, verification and every stat:
+
+```bash
+claude mcp add credible --env CREDIBLE_URL=https://YOUR-INSTANCE -- node /path/to/credible/mcp/server.js
+```
+
+Every instance also serves **`/llms.txt`**, a short brief with its own URLs baked
+in that you can hand to any model. The full runbook is in
+**[docs/AI-SETUP.md](docs/AI-SETUP.md)**.
 
 ## Features
 
@@ -180,6 +214,10 @@ The complete list, including the tuning and geo-database settings, is in
 
 ```bash
 credible serve                  # start the server (default command)
+credible provision              # account + site + API key in one command
+                                #   --email … [--domain …] [--timezone …] [--json]
+credible install                # insert the snippet into a website's source tree
+                                #   --domain … [--url …] [--path .] [--dry-run] [--json]
 credible seed [domain]          # fill the database with demo traffic
                                 #   [--days 60] [--visitors 220]
 credible user:add <email>       # create a dashboard user

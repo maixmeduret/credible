@@ -20,12 +20,15 @@ browser ─▶ public/js/cr.js ─▶ POST /api/event ─▶ src/ingest ─▶ S
 | `src/routes.js` | Every endpoint. Read this first when you need to know what the API does. |
 | `src/auth/index.js` | scrypt passwords, login sessions, API keys, shared links. `currentUser()` accepts a session cookie **or** `Authorization: Bearer cred_…`. |
 | `src/sites.js`, `src/goals.js` | Site records, exclusion rules, goals, funnels. |
+| `src/provision.js` | Account + key + site in one function, shared by `POST /api/v1/provision` and `credible provision`. Keep the two paths on it. |
+| `src/install.js` | Detects a website's framework and writes the snippet into its `<head>`. Pure file surgery, no database. |
 | `src/db/` | `schema.sql` is the whole data model; `index.js` holds pragmas, migrations, cached statements. |
 | `src/ingest/` | Beacon → one `events` row + one created-or-extended `visits` row. `salt.js` is privacy-critical. |
 | `src/stats/` | `query.js` is the only place that emits SQL; `index.js` computes every dashboard number. |
 | `src/util/` | `http.js` (JSON, CORS, `HttpError`), `time.js` (DST-safe bucketing via `Intl`), `log.js` (never logs an IP). |
 | `tracker/src/credible.js` | Tracker source. Built to `public/js/cr.js`, which **is committed**. |
 | `public/` | Dashboard SPA: unbundled modern ESM, loaded only by the operator. |
+| `mcp/` | MCP server exposing the same API as typed tools. |
 | `test/` | `node:test` suites. `helpers.js` must be imported *before* any `src/` module. |
 
 Four decisions explain the rest: sessionization happens at **write** time; dimensions are
@@ -38,7 +41,8 @@ unix-second ranges; visitor identity is a **daily-rotating hash** with no user t
 node bin/credible.js serve                  # http://localhost:8000, creates ./data/credible.db
 npm run dev                                 # same, with --watch and debug logging
 node bin/credible.js seed example.com --days 30 --visitors 40   # realistic demo traffic
-node bin/credible.js user:add you@example.com --api-key         # account + key, printed once
+node bin/credible.js provision --email you@example.com --domain example.com --json
+node bin/credible.js install --domain example.com --path ../their-site --dry-run
 node bin/credible.js site:list
 node bin/credible.js export example.com --days 30 > events.csv
 node bin/credible.js help
