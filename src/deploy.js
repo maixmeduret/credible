@@ -543,9 +543,14 @@ export async function deploy(options = {}) {
   if (opts.dryRun) {
     ctx.notes.push('Dry run: nothing was executed, no file was written and no network call was made.');
   }
-  if (!fs.existsSync(ENTRY_POINT) && (target === 'local' || target === 'tunnel')) {
-    ctx.notes.push(`The CLI entry point is missing at ${ENTRY_POINT}.`);
-    return result(ctx, { status: 'blocked', blocked_by: `no ${ENTRY_POINT} — run deploy from a Credible checkout` });
+  // Both of these are "you are not in a Credible checkout" in disguise, and
+  // they are much clearer here than as a build error three minutes later.
+  const needs = target === 'docker' || target === 'fly'
+    ? path.join(REPO_ROOT, 'Dockerfile')
+    : ENTRY_POINT;
+  if (!fs.existsSync(needs)) {
+    ctx.notes.push(`${needs} is missing, so there is nothing to deploy from.`);
+    return result(ctx, { status: 'blocked', blocked_by: `no ${needs} — run deploy from a Credible checkout` });
   }
 
   ctx.step(`Deploying with target "${target}"`);
@@ -841,7 +846,7 @@ async function deployTunnel(ctx) {
   const local = await deployLocal(ctx);
   if (local.status === 'blocked') {
     ctx.notes.push('The tunnel was not started because the local instance never came up.');
-    return { ...local, target: 'tunnel' };
+    return { ...local, target: 'tunnel', ephemeral: true };
   }
 
   const tunnelService = {
@@ -1068,7 +1073,9 @@ app = "${appName}"
 primary_region = "${region}"
 
 [build]
-  dockerfile = "Dockerfile"
+  # Absolute on purpose: this config lives in a temp directory, and a relative
+  # path here would be resolved against a directory that has no Dockerfile.
+  dockerfile = "${path.join(REPO_ROOT, 'Dockerfile')}"
 
 [env]
   CREDIBLE_DATA_DIR = "/data"
@@ -1248,9 +1255,11 @@ async function deployFly(ctx) {
  * @param {object} [options]
  * @param {'auto'|'local'|'tunnel'|'docker'|'fly'} [options.target='auto']
  * @param {string} [options.appName] required to name a Fly app in the notes
+ * @param {string} [options.dataDir] where the pid files live, when there is no
+ *                                   service manager; defaults to ~/.credible/data
  * @returns {Promise<{stopped:boolean, commands:Array<object>, notes:string[]}>}
  */
-export async function stopInstance({ target = 'auto', appName = '' } = {}) {
+export async function stopInstance({ target = 'auto', appName = '', dataDir = DEFAULT_DATA_DIR } = {}) {
   if (!TARGETS.has(target)) {
     throw new TypeError(`Unknown target ${JSON.stringify(target)} — expected one of: ${[...TARGETS].join(', ')}`);
   }
@@ -1311,9 +1320,10 @@ export async function stopInstance({ target = 'auto', appName = '' } = {}) {
       : `${SYSTEMD_UNIT} was not running (exit ${unload.code}) — nothing to stop.`);
   } else {
     // No service manager: only ever signal a pid we wrote down ourselves.
+    const pidHome = path.resolve(String(dataDir || DEFAULT_DATA_DIR));
     for (const [label, file] of [['instance', 'credible.pid'], ['tunnel', 'tunnel.pid']]) {
       if (label === 'tunnel' && !wantsTunnel) continue;
-      const pidFile = path.join(DEFAULT_DATA_DIR, file);
+      const pidFile = path.join(pidHome, file);
       const record = plannedCommand('kill', ['-TERM', `$(cat ${pidFile})`]);
       let pid = 0;
       try {
@@ -1340,7 +1350,7 @@ export async function stopInstance({ target = 'auto', appName = '' } = {}) {
       }
       commands.push(record);
     }
-    notes.push(`Only pids written by deploy() are signalled, and only the ones under ${DEFAULT_DATA_DIR}.`);
+    notes.push(`Only pids written by deploy() are signalled, and only the ones under ${pidHome}.`);
   }
 
   notes.push('Nothing was deleted: the database, the launch agents and the unit files are all still in place.');

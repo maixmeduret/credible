@@ -1,7 +1,16 @@
 /** Thin client over Credible's own dashboard API. */
 
+/**
+ * Where this instance is mounted. Empty at the root of a domain, '/stats' when
+ * it is served under a path of a bigger site (see CREDIBLE_BASE_PATH).
+ */
+export const BASE = String(window.CREDIBLE_BASE || '').replace(/\/+$/, '');
+
+/** Prefix an app path with the mount point. */
+export const withBase = (path) => `${BASE}${path}`;
+
 async function request(method, path, { body, query } = {}) {
-  const url = new URL(path, window.location.origin);
+  const url = new URL(withBase(path), window.location.origin);
   for (const [key, value] of Object.entries(query || {})) {
     if (value == null || value === '') continue;
     url.searchParams.set(key, value);

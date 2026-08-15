@@ -220,6 +220,7 @@ Everything is environment variables — there is no config file to manage.
 | `CREDIBLE_DATA_DIR` | `./data` | Directory for the database |
 | `CREDIBLE_DATABASE` | `$DATA_DIR/credible.db` | Explicit database path |
 | `CREDIBLE_BASE_URL` | *(guessed)* | Public origin, used in snippets and shared links |
+| `CREDIBLE_BASE_PATH` | *(none)* | Mount under a path, e.g. `/stats`, to serve it from your site's own domain |
 | `CREDIBLE_TRUST_PROXY` | `false` | Honour `X-Forwarded-For` — enable behind a proxy |
 | `CREDIBLE_SESSION_TTL` | `2592000` | Dashboard login lifetime, seconds |
 | `CREDIBLE_SECURE_COOKIES` | `false` | Mark the session cookie `Secure` (set behind HTTPS) |

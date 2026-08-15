@@ -102,12 +102,32 @@
   var EXCLUDED = buildExclusions(attr(script, 'data-exclude'));
   var ENDPOINT = attr(script, 'data-api') || apiEndpoint(script.src);
 
-  /** Derive `<script origin>/api/event` from the script URL, without the DOM. */
+  /**
+   * Derive the ingestion endpoint from the script's own URL, without the DOM.
+   *
+   * Everything up to the `/js/` segment is kept, so an instance mounted under a
+   * path works exactly like one at the root of a domain:
+   *   https://site.fr/js/cr.js        -> https://site.fr/api/event
+   *   https://site.fr/stats/js/cr.js  -> https://site.fr/stats/api/event
+   * That second form is what first-party serving looks like: the script and the
+   * events come from the measured site's own origin.
+   */
   function apiEndpoint(src) {
-    var origin = (location.protocol || 'https:') + '//' + (location.host || location.hostname || '');
-    var match = /^(https?:)?\/\/([^\/?#]+)/i.exec(src || '');
-    if (match) origin = (match[1] || location.protocol || 'https:') + '//' + match[2];
-    return origin + '/api/event';
+    var url = String(src || '');
+    var fallbackOrigin = (location.protocol || 'https:') + '//' + (location.host || location.hostname || '');
+    var origin = fallbackOrigin;
+    var path = '';
+
+    var absolute = /^((?:[a-z][a-z0-9+.-]*:)?\/\/[^\/?#]+)([^?#]*)/i.exec(url);
+    if (absolute) {
+      origin = absolute[1].indexOf('//') === 0 ? (location.protocol || 'https:') + absolute[1] : absolute[1];
+      path = absolute[2] || '';
+    } else {
+      path = url.split('?')[0].split('#')[0];
+      if (path.charAt(0) !== '/') path = '/' + path;
+    }
+
+    return origin + path.replace(/\/js\/[^\/]*$/, '') + '/api/event';
   }
 
   /**

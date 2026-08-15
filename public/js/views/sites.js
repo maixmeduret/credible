@@ -39,7 +39,7 @@ export async function renderSites(container, ctx) {
       grid.appendChild(
         h(
           'a',
-          { class: 'card site-card', href: `/${site.domain}`, onClick: ctx.link(`/${site.domain}`) },
+          { class: 'card site-card', href: ctx.withBase(`/${site.domain}`), onClick: ctx.link(`/${site.domain}`) },
           h(
             'div',
             { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' } },

@@ -7,14 +7,18 @@
     <meta name="description" content="Credible — simple, privacy-first web analytics. Open source and free to self-host." />
     <meta name="robots" content="noindex" />
     <title>Credible</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/app.css" />
+    <link rel="icon" href="__CREDIBLE_BASE__/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="__CREDIBLE_BASE__/app.css" />
   </head>
   <body>
     <div id="root">
       <div class="boot"><span class="spinner" aria-hidden="true"></span></div>
     </div>
-    <script type="module" src="/js/app.js"></script>
+    <!-- Where this instance is mounted; '' at the root of a domain, '/stats' under a path. -->
+    <script>
+      window.CREDIBLE_BASE = '__CREDIBLE_BASE__';
+    </script>
+    <script type="module" src="__CREDIBLE_BASE__/js/app.js"></script>
     <noscript>
       <p style="padding: 2rem; font: 16px system-ui">
         Credible's dashboard needs JavaScript. The tracking endpoint and the Stats API work without it.

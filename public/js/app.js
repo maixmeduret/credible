@@ -8,7 +8,7 @@
  *   /account              API keys and password
  *   /share/:domain        a shared, read-only dashboard (?auth=<slug>)
  */
-import { api } from './api.js';
+import { BASE, api, withBase } from './api.js';
 import { clear, h, icon, logo, popover, replace, toast } from './dom.js';
 import { renderAuth } from './views/auth.js';
 import { renderSites } from './views/sites.js';
@@ -34,10 +34,20 @@ export function applyTheme(theme) {
 }
 
 export function navigate(path, { replace: replaceEntry = false } = {}) {
-  if (replaceEntry) history.replaceState({}, '', path);
-  else history.pushState({}, '', path);
+  const url = withBase(path);
+  if (replaceEntry) history.replaceState({}, '', url);
+  else history.pushState({}, '', url);
   render();
 }
+
+/** The app path of the current URL, with the mount point removed. */
+function appPath() {
+  let pathname = location.pathname;
+  if (BASE && pathname.startsWith(BASE)) pathname = pathname.slice(BASE.length) || '/';
+  return pathname.replace(/\/+$/, '') || '/';
+}
+
+export { withBase };
 
 /** The stats query lives in the URL so every view is linkable and shareable. */
 export function currentQuery() {
@@ -127,7 +137,7 @@ function topbar() {
   const bar = h(
     'header',
     { class: 'topbar' },
-    h('a', { class: 'brand', href: '/', onClick: link('/') }, logo(26), 'Credible'),
+    h('a', { class: 'brand', href: withBase('/'), onClick: link('/') }, logo(26), 'Credible'),
   );
 
   const right = h('div', { class: 'topbar-right' });
@@ -179,11 +189,11 @@ const context = {
   refreshSession,
   toast,
   link,
+  withBase,
 };
 
 async function render() {
-  const path = location.pathname.replace(/\/+$/, '') || '/';
-  const segments = path.split('/').filter(Boolean);
+  const segments = appPath().split('/').filter(Boolean);
   state.shared = segments[0] === 'share';
 
   if (!state.user && !state.shared) {

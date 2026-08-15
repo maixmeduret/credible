@@ -26,7 +26,7 @@ export async function renderSiteSettings(container, ctx) {
         h('h2', {}, domain),
         h('p', { class: 'notice', style: { margin: 0 } }, 'Site settings'),
       ),
-      h('a', { class: 'btn', href: `/${domain}`, onClick: ctx.link(`/${domain}`) }, 'Back to dashboard'),
+      h('a', { class: 'btn', href: ctx.withBase(`/${domain}`), onClick: ctx.link(`/${domain}`) }, 'Back to dashboard'),
     ),
   );
 
@@ -507,7 +507,7 @@ function addFunnel(ctx, domain, payload, redraw) {
 export async function renderAccount(container, ctx) {
   const { api, state } = ctx;
   container.appendChild(
-    h('div', { class: 'section-title' }, h('h2', {}, 'Account'), h('a', { class: 'btn', href: '/', onClick: ctx.link('/') }, 'All sites')),
+    h('div', { class: 'section-title' }, h('h2', {}, 'Account'), h('a', { class: 'btn', href: ctx.withBase('/'), onClick: ctx.link('/') }, 'All sites')),
   );
 
   const keysList = h('ul', { class: 'list' });

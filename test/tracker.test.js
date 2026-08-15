@@ -653,6 +653,39 @@ test('data-api overrides the ingestion endpoint', () => {
   assert.equal(env.requests[0].url, 'https://proxy.example.com/e');
 });
 
+test('an instance mounted under a path posts back to that path', () => {
+  // First-party serving: the script comes from the measured site's own origin,
+  // under a mount point, and its events must go to the same place rather than
+  // to the root of the domain.
+  const env = createEnv({ src: 'https://example.com/stats/js/cr.js' });
+  env.load();
+  assert.equal(env.requests[0].url, 'https://example.com/stats/api/event');
+});
+
+test('the mount point may be several segments deep', () => {
+  const env = createEnv({ src: 'https://example.com/internal/tools/analytics/js/cr.js' });
+  env.load();
+  assert.equal(env.requests[0].url, 'https://example.com/internal/tools/analytics/api/event');
+});
+
+test('a root-mounted instance is unaffected', () => {
+  const env = createEnv({ src: 'https://cdn.credible.test/js/cr.js' });
+  env.load();
+  assert.equal(env.requests[0].url, 'https://cdn.credible.test/api/event');
+});
+
+test('a relative script src resolves against the page origin', () => {
+  const env = createEnv({ url: 'https://example.com/pricing', src: '/stats/js/cr.js' });
+  env.load();
+  assert.equal(env.requests[0].url, 'https://example.com/stats/api/event');
+});
+
+test('a protocol-relative script src keeps the page protocol', () => {
+  const env = createEnv({ url: 'https://example.com/', src: '//cdn.credible.test/stats/js/cr.js' });
+  env.load();
+  assert.equal(env.requests[0].url, 'https://cdn.credible.test/stats/api/event');
+});
+
 test('a missing data-domain disables the script without throwing', () => {
   const env = createEnv({ domain: '' });
   assert.doesNotThrow(() => env.load());

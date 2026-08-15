@@ -33,6 +33,13 @@ function envBool(key, fallback) {
 
 const dataDir = path.resolve(env('CREDIBLE_DATA_DIR', path.join(ROOT, 'data')));
 
+/** '' | '/stats' — always a leading slash, never a trailing one. */
+export function normalizeBasePath(value) {
+  const trimmed = String(value || '').trim().replace(/\/+$/, '');
+  if (!trimmed || trimmed === '/') return '';
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
+
 export const config = {
   /** Directory holding the SQLite database and any generated secrets. */
   dataDir,
@@ -43,6 +50,17 @@ export const config = {
 
   /** Public origin, used in the install snippet and shared links. */
   baseUrl: env('CREDIBLE_BASE_URL', '').replace(/\/+$/, ''),
+
+  /**
+   * Mount point when Credible is served under a path of a bigger site, e.g.
+   * CREDIBLE_BASE_PATH=/stats puts the dashboard at https://monsite.fr/stats
+   * and the tracker at https://monsite.fr/stats/js/cr.js.
+   *
+   * This is what makes first-party analytics possible: the script is served
+   * from the measured site's own origin, so there is no cross-origin request
+   * and no separate hostname for a blocklist to match.
+   */
+  basePath: normalizeBasePath(env('CREDIBLE_BASE_PATH', '')),
 
   /** Trust X-Forwarded-For / CF-Connecting-IP. Enable behind a reverse proxy. */
   trustProxy: envBool('CREDIBLE_TRUST_PROXY', false),
@@ -86,12 +104,16 @@ export function ensureDataDir() {
   return config.dataDir;
 }
 
-/** Public origin of this instance, guessed from the request when unset. */
+/**
+ * The public base URL of this instance — origin plus mount point. Everything
+ * user-facing (the install snippet, shared links, the agent brief) is built
+ * from this, so it must include the base path.
+ */
 export function originFor(req) {
-  if (config.baseUrl) return config.baseUrl;
+  if (config.baseUrl) return config.baseUrl + config.basePath;
   const proto = config.trustProxy ? (req?.headers['x-forwarded-proto'] || 'http') : 'http';
   const host = req?.headers.host || `localhost:${config.port}`;
-  return `${String(proto).split(',')[0].trim()}://${host}`;
+  return `${String(proto).split(',')[0].trim()}://${host}${config.basePath}`;
 }
 
 export const hostname = os.hostname();

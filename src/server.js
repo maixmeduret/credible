@@ -117,9 +117,17 @@ export function serveStatic(req, res, relativePath) {
   return true;
 }
 
+/**
+ * Serve an HTML shell, substituting the mount point into every absolute URL it
+ * contains. The dashboard is a static file set, so this is the one place where
+ * it learns where it lives.
+ */
 export function sendHtml(res, name) {
   const filePath = path.join(PUBLIC_DIR, name);
-  const body = fs.readFileSync(filePath);
+  const body = Buffer.from(
+    fs.readFileSync(filePath, 'utf8').replaceAll('__CREDIBLE_BASE__', config.basePath),
+    'utf8',
+  );
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8',
     'content-length': body.length,
@@ -127,6 +135,18 @@ export function sendHtml(res, name) {
     ...securityHeaders,
   });
   res.end(body);
+}
+
+/**
+ * Remove the mount point from a request path.
+ * Returns null when the request is outside the mount point entirely.
+ */
+export function stripBasePath(pathname) {
+  const base = config.basePath;
+  if (!base) return pathname;
+  if (pathname === base) return '/';
+  if (pathname.startsWith(`${base}/`)) return pathname.slice(base.length);
+  return null;
 }
 
 async function handle(req, res) {
@@ -139,7 +159,10 @@ async function handle(req, res) {
     return;
   }
 
-  const found = match(req.method, url.pathname);
+  const pathname = stripBasePath(url.pathname);
+  if (pathname === null) throw new HttpError(404, 'Not found');
+
+  const found = match(req.method, pathname);
   if (found) {
     await found.handler({ req, res, params: found.params, query, url });
     return;
@@ -147,8 +170,9 @@ async function handle(req, res) {
 
   // Static assets, then the SPA shell for everything else.
   if (req.method === 'GET' || req.method === 'HEAD') {
-    if (serveStatic(req, res, url.pathname)) return;
-    if (!url.pathname.startsWith('/api/')) {
+    // index.html always goes through sendHtml so the mount point is injected.
+    if (!/^\/(index\.html)?$/.test(pathname) && serveStatic(req, res, pathname)) return;
+    if (!pathname.startsWith('/api/')) {
       sendHtml(res, 'index.html');
       return;
     }
