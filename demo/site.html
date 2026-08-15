@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Credible — tracker test page</title>
+    <!--
+      This page exists to exercise the tracker end to end during development.
+      It is only served when CREDIBLE_DEV=1, and `data-track-localhost` is what
+      makes events count from localhost at all.
+    -->
+    <script
+      defer
+      data-domain="demo.credible.dev"
+      data-track-localhost
+      data-debug
+      data-exclude="/private/*"
+      src="/js/cr.js"
+    ></script>
+    <style>
+      body { font: 16px/1.6 system-ui, sans-serif; background: #0b0b0e; color: #e7e7ea; margin: 0; padding: 48px 24px; }
+      main { max-width: 720px; margin: 0 auto; }
+      h1 { letter-spacing: -0.02em; }
+      button, a.action { display: inline-block; margin: 4px 6px 4px 0; padding: 8px 14px; border-radius: 9px; border: 1px solid #26262e; background: #131318; color: inherit; cursor: pointer; text-decoration: none; }
+      code { background: #1a1a21; padding: 2px 5px; border-radius: 4px; }
+      section { border-top: 1px solid #26262e; margin-top: 28px; padding-top: 20px; }
+      .spacer { height: 1400px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Credible tracker test page</h1>
+      <p>Every control here produces a real event. Watch them land on the dashboard.</p>
+
+      <section>
+        <h2>Navigation</h2>
+        <button onclick="history.pushState({}, '', '/pricing')">pushState → /pricing</button>
+        <button onclick="history.pushState({}, '', '/blog/hello')">pushState → /blog/hello</button>
+        <button onclick="history.pushState({}, '', '/private/secret')">pushState → /private/secret (excluded)</button>
+        <button onclick="history.back()">Back</button>
+      </section>
+
+      <section>
+        <h2>Automatic events</h2>
+        <a class="action" href="https://example.com" target="_blank" rel="noreferrer">Outbound link</a>
+        <a class="action" href="/files/report.pdf">File download</a>
+        <form onsubmit="event.preventDefault()"><button type="submit">Submit a form</button></form>
+      </section>
+
+      <section>
+        <h2>Custom events</h2>
+        <button onclick="credible('Signup', { props: { plan: 'pro' } })">credible("Signup")</button>
+        <button onclick="credible('Purchase', { props: { plan: 'pro' }, revenue: { amount: 39, currency: 'EUR' } })">
+          Purchase with revenue
+        </button>
+        <button class="credible+Tagged Click" data-credible-event-name="Tagged Click" data-credible-event-source="test-page">
+          Tagged element
+        </button>
+      </section>
+
+      <section>
+        <h2>Engagement</h2>
+        <p>Scroll to the bottom, then switch tabs — an <code>engagement</code> event with the time spent and the scroll depth is sent.</p>
+        <div class="spacer"></div>
+        <p>You reached the bottom. Scroll depth should now report 100%.</p>
+      </section>
+    </main>
+  </body>
+</html>

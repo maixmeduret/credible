@@ -1,0 +1,29 @@
+# Keep the build context to the application itself.
+.git
+.github
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+fly.toml
+
+# Local state must never be baked into an image.
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# Development noise.
+node_modules/
+coverage/
+*.log
+.DS_Store
+
+# Documentation is not needed at runtime.
+docs/
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+README.md

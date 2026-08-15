@@ -1,0 +1,28 @@
+# Dependencies (there are none, but tooling still creates this)
+node_modules/
+
+# Local instance state — never commit an analytics database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+
+# Test and coverage output
+coverage/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

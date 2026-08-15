@@ -1,0 +1,40 @@
+# Credible — single service, single volume.
+#
+#   docker compose up -d
+#   docker compose logs -f credible   # the first-run link to create your account
+#
+# Put a TLS-terminating reverse proxy in front of this in production and set
+# CREDIBLE_BASE_URL, CREDIBLE_TRUST_PROXY and CREDIBLE_SECURE_COOKIES
+# accordingly — see docs/SELF-HOSTING.md.
+
+services:
+  credible:
+    build: .
+    # Or use a prebuilt image instead of building locally:
+    # image: ghcr.io/credible-analytics/credible:latest
+    container_name: credible
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - credible_data:/data
+    environment:
+      # Public origin of this instance. Used in the install snippet and in
+      # shared dashboard links, so set it to the URL people actually visit.
+      CREDIBLE_BASE_URL: "http://localhost:8000"
+
+      # Enable both of these once a reverse proxy terminates HTTPS in front:
+      # CREDIBLE_TRUST_PROXY: "true"
+      # CREDIBLE_SECURE_COOKIES: "true"
+
+      # Open so you can create the first account. Set it to "false" and run
+      # `docker compose up -d` again once your accounts exist.
+      CREDIBLE_OPEN_REGISTRATION: "true"
+
+      # Delete raw events older than N days. 0 keeps them forever.
+      CREDIBLE_RETENTION_DAYS: "0"
+
+      CREDIBLE_LOG_LEVEL: "info"
+
+volumes:
+  credible_data:

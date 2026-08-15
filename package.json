@@ -1,0 +1,40 @@
+{
+  "name": "credible",
+  "version": "0.1.0",
+  "description": "Credible — privacy-first, cookieless web analytics. Simple numbers, zero dependencies, one command to self-host.",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "credible": "./bin/credible.js"
+  },
+  "scripts": {
+    "start": "node bin/credible.js serve",
+    "dev": "CREDIBLE_DEV=1 CREDIBLE_LOG_LEVEL=debug node --watch bin/credible.js serve",
+    "build:tracker": "node tracker/build.js",
+    "seed": "node bin/credible.js seed",
+    "test": "node --test",
+    "demo": "node bin/credible.js demo"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "tracker",
+    "docs"
+  ],
+  "keywords": [
+    "analytics",
+    "web-analytics",
+    "privacy",
+    "cookieless",
+    "gdpr",
+    "plausible-alternative",
+    "google-analytics-alternative",
+    "self-hosted"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}
