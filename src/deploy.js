@@ -53,6 +53,9 @@ const SYSTEMD_TUNNEL_UNIT = 'credible-tunnel';
 
 const DOCKER_CONTAINER = 'credible';
 const DOCKER_IMAGE = 'credible:latest';
+/** Stamped on containers we create, so a later run knows what it may replace. */
+const DOCKER_LABEL = 'credible.managed';
+const DOCKER_LABEL_VALUE = 'credible-deploy';
 const DOCKER_VOLUME = 'credible_data';
 const FLY_VOLUME = 'credible_data';
 
@@ -131,6 +134,40 @@ function resolveBinary(name) {
   if (!/^[a-z0-9_-]+$/i.test(name)) return '';
   const result = probe('/bin/sh', ['-c', `command -v ${name}`]);
   return result.code === 0 ? firstLine(result.output) : '';
+}
+
+/**
+ * Ask the operating system what a pid is running right now.
+ *
+ * Pids are recycled. A pid file that outlived its process points at whatever
+ * number the kernel handed out next, so a stop that trusts the file alone can
+ * SIGTERM a stranger's process. Nothing is ever signalled without this.
+ *
+ * @returns {{checked: boolean, command: string}} checked:false means the
+ *   question could not be asked at all, which is never treated as a yes.
+ */
+function processCommand(pid) {
+  if (process.platform === 'win32') {
+    const listed = probe('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+    if (!listed.ran) return { checked: false, command: '' };
+    // tasklist exits 0 with "INFO: No tasks are running…" when nothing matches.
+    const line = firstLine(listed.output);
+    return { checked: true, command: line.startsWith('"') ? line : '' };
+  }
+  const listed = probe('ps', ['-p', String(pid), '-o', 'command=']);
+  if (!listed.ran) return { checked: false, command: '' };
+  return { checked: true, command: listed.code === 0 ? firstLine(listed.output) : '' };
+}
+
+/** Is that command line one of the processes this module starts? */
+function looksLikeOurProcess(label, command) {
+  if (label === 'tunnel') return /cloudflared/i.test(command);
+  // The instance: our own entry point, by absolute path where we can see it.
+  if (command.includes(ENTRY_POINT)) return true;
+  if (/(^|[\\/])bin[\\/]credible\.js(\s|$)/.test(command)) return true;
+  // Windows `tasklist` reports the image name and nothing else, so a Node
+  // process is the most that can be asked for there.
+  return process.platform === 'win32' && /^"node(\.exe)?"/i.test(command);
 }
 
 /**
@@ -390,11 +427,15 @@ export async function instanceStatus(url) {
   };
 }
 
-/** Poll until the instance answers, or give up. Returns the last status seen. */
+/**
+ * Poll until the instance answers with status "ok", or give up. Returns the
+ * last status seen. Waiting for "ok" rather than for any answer at all is what
+ * keeps a stranger's server on the same port from being reported as ours.
+ */
 async function waitForHealth(probeUrl, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last = await instanceStatus(probeUrl);
-  while (!last.reachable && Date.now() < deadline) {
+  while (!last.healthy && Date.now() < deadline) {
     await sleep(500);
     last = await instanceStatus(probeUrl);
   }
@@ -761,14 +802,19 @@ async function deployLocal(ctx, baseUrl = `http://localhost:${ctx.port}`) {
 
   ctx.step('Waiting for the instance to answer');
   const health = await waitForHealth(probeUrl, LOCAL_READY_TIMEOUT_MS);
-  if (!health.reachable) {
+  if (!health.healthy) {
     ctx.notes.push(`Logs: ${SERVER_ERR_LOG} and ${SERVER_LOG}.`);
+    // Reachable but not "ok" means something else already holds the port. Our
+    // service could not bind, and reporting that stranger's URL as the new
+    // instance would be worse than saying nothing worked.
     return result(ctx, {
       status: 'blocked',
       url: '',
       service,
-      blocked_by: `nothing answered on ${probeUrl}/api/health within 15s (${health.error})`,
-      next: [`Read the log: tail -n 50 ${SERVER_ERR_LOG}`, `Check the port is free: lsof -nP -iTCP:${ctx.port} -sTCP:LISTEN`],
+      blocked_by: health.reachable
+        ? `port ${ctx.port} is held by something that is not Credible (${health.error}) — pick another port with the port option`
+        : `nothing answered on ${probeUrl}/api/health within 15s (${health.error})`,
+      next: [`Read the log: tail -n 50 ${SERVER_ERR_LOG}`, `See what holds the port: lsof -nP -iTCP:${ctx.port} -sTCP:LISTEN`],
     });
   }
 
@@ -977,6 +1023,8 @@ async function deployDocker(ctx) {
     'run', '-d',
     '--name', DOCKER_CONTAINER,
     '--restart', 'unless-stopped',
+    // How a later run recognises its own container before replacing it.
+    '--label', `${DOCKER_LABEL}=${DOCKER_LABEL_VALUE}`,
     '-p', `${ctx.port}:8000`,
     '-v', `${DOCKER_VOLUME}:/data`,
     '-e', 'CREDIBLE_BASE_URL=',
@@ -990,7 +1038,7 @@ async function deployDocker(ctx) {
 
   if (ctx.dryRun) {
     ctx.plan('docker', ['build', '-t', DOCKER_IMAGE, REPO_ROOT]);
-    ctx.plan('docker', ['rm', '-f', DOCKER_CONTAINER], '[only if a container of that name already exists]');
+    ctx.plan('docker', ['rm', '-f', DOCKER_CONTAINER], '[only if a container of that name exists AND credible deploy is the one that created it]');
     ctx.plan('docker', runArgs);
     ctx.notes.push(`The database lives on the named volume ${DOCKER_VOLUME}, never inside the container, which is what makes recreating the container safe.`);
     return result(ctx, { status: 'planned', url, service, next });
@@ -1029,9 +1077,47 @@ async function deployDocker(ctx) {
   // Idempotent converge: the container is disposable, the volume is not.
   const existing = await ctx.run('docker', ['ps', '-a', '--filter', `name=^${DOCKER_CONTAINER}$`, '--format', '{{.Names}}'], { timeout: 30_000 });
   if (existing.code === 0 && existing.output.split('\n').includes(DOCKER_CONTAINER)) {
+    // A container of that name is not automatically ours. docker-compose calls
+    // its container `credible` too, and keeps its database on a *different*,
+    // project-prefixed volume — force-removing that one would break the user's
+    // compose setup and hand them an empty dashboard. So: only ever replace a
+    // container this module can positively identify as its own.
+    ctx.step('Checking who owns the existing container');
+    const inspected = await ctx.run('docker', [
+      'inspect', DOCKER_CONTAINER,
+      '--format', `{{index .Config.Labels "${DOCKER_LABEL}"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.Config.Image}}|{{range .Mounts}}{{.Name}} {{end}}`,
+    ], { timeout: 30_000 });
+    const field = (value) => (value === undefined || value.trim() === '<no value>' ? '' : value.trim());
+    const [managed, composeProject, image, mounted] = firstLine(inspected.output).split('|').map(field);
+    const mounts = mounted ? mounted.split(/\s+/) : [];
+    const ours = inspected.code === 0 && (
+      managed === DOCKER_LABEL_VALUE
+      // Created by a version of this module that predates the label: no
+      // compose project owns it, and it holds our volume or our image.
+      || (!composeProject && (mounts.includes(DOCKER_VOLUME) || image === DOCKER_IMAGE))
+    );
+    if (!ours) {
+      if (inspected.code !== 0) {
+        ctx.notes.push(`\`docker inspect ${DOCKER_CONTAINER}\` failed (exit ${inspected.code}), so the container was treated as someone else's and left alone.`);
+      }
+      return result(ctx, {
+        status: 'blocked',
+        url: '',
+        service,
+        blocked_by: composeProject
+          ? `a container named ${DOCKER_CONTAINER} belongs to docker compose (project "${composeProject}") — it was left running and untouched`
+          : `a container named ${DOCKER_CONTAINER} exists but credible deploy did not create it — it was left running and untouched`,
+        next: [
+          composeProject
+            ? `Keep using compose for it: docker compose up -d --build (its database is on the ${composeProject}_${DOCKER_VOLUME} volume, not on ${DOCKER_VOLUME}).`
+            : `Look at what it is: docker inspect ${DOCKER_CONTAINER}`,
+          `Or, once you are sure it is disposable, remove it yourself and run this again: docker rm -f ${DOCKER_CONTAINER}`,
+        ],
+      });
+    }
     ctx.step('Replacing the existing container');
     await ctx.run('docker', ['rm', '-f', DOCKER_CONTAINER], { timeout: 60_000 });
-    ctx.notes.push(`An existing container named ${DOCKER_CONTAINER} was replaced. Its data was never at risk: the database lives on the named volume ${DOCKER_VOLUME}.`);
+    ctx.notes.push(`The container named ${DOCKER_CONTAINER} that this command created earlier was replaced. Its data was never at risk: the database lives on the named volume ${DOCKER_VOLUME}.`);
   }
 
   ctx.step('Starting the container');
@@ -1048,12 +1134,14 @@ async function deployDocker(ctx) {
 
   ctx.step('Waiting for the container to answer');
   const health = await waitForHealth(`http://127.0.0.1:${ctx.port}`, LOCAL_READY_TIMEOUT_MS);
-  if (!health.reachable) {
+  if (!health.healthy) {
     return result(ctx, {
       status: 'blocked',
       url: '',
       service,
-      blocked_by: `the container started but nothing answered on ${url}/api/health within 15s (${health.error})`,
+      blocked_by: health.reachable
+        ? `the container started but ${url}/api/health is answered by something that is not Credible (${health.error})`
+        : `the container started but nothing answered on ${url}/api/health within 15s (${health.error})`,
       next: [`Read the container log: docker logs ${DOCKER_CONTAINER}`],
     });
   }
@@ -1235,7 +1323,7 @@ async function deployFly(ctx) {
 
   ctx.step('Waiting for the app to answer');
   const health = await waitForHealth(url, REMOTE_READY_TIMEOUT_MS);
-  ctx.notes.push(health.reachable
+  ctx.notes.push(health.healthy
     ? `Credible ${health.version} is answering on ${url}.`
     : `The deploy succeeded but ${url} has not answered yet (${health.error}) — Fly machines and DNS sometimes need another minute.`);
   ctx.notes.push(`Config used: ${configPath} (a temp file — the repository's fly.toml was not touched).`);
@@ -1250,7 +1338,8 @@ async function deployFly(ctx) {
 /**
  * Stop what deploy() started, and nothing else. Never deletes an app, a
  * volume, an image or a database, and never signals a process it did not
- * start itself.
+ * start itself — a pid read from a pid file is checked against the running
+ * process before anything is sent to it, because pids are recycled.
  *
  * @param {object} [options]
  * @param {'auto'|'local'|'tunnel'|'docker'|'fly'} [options.target='auto']
@@ -1319,30 +1408,75 @@ export async function stopInstance({ target = 'auto', appName = '', dataDir = DE
       ? `Stopped and disabled ${SYSTEMD_UNIT}. The unit file is still at ${systemdUnitPath(SYSTEMD_UNIT)}.`
       : `${SYSTEMD_UNIT} was not running (exit ${unload.code}) — nothing to stop.`);
   } else {
-    // No service manager: only ever signal a pid we wrote down ourselves.
+    // No service manager: signal a pid we wrote down ourselves, and only after
+    // the operating system confirms that pid is still the process we started.
     const pidHome = path.resolve(String(dataDir || DEFAULT_DATA_DIR));
     for (const [label, file] of [['instance', 'credible.pid'], ['tunnel', 'tunnel.pid']]) {
       if (label === 'tunnel' && !wantsTunnel) continue;
       const pidFile = path.join(pidHome, file);
-      const record = plannedCommand('kill', ['-TERM', `$(cat ${pidFile})`]);
-      let pid = 0;
+
+      let raw = '';
       try {
-        pid = Number.parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+        raw = fs.readFileSync(pidFile, 'utf8');
       } catch {
-        record.output = `no pid file at ${pidFile}`;
-        commands.push(record);
+        commands.push(plannedCommand('kill', ['-TERM', `<${label} pid>`], `no pid file at ${pidFile}`));
         continue;
       }
+      const pid = Number.parseInt(String(raw).trim(), 10);
       if (!Number.isInteger(pid) || pid <= 1) {
-        record.output = `${pidFile} does not hold a usable pid`;
+        commands.push(plannedCommand('kill', ['-TERM', `<${label} pid>`], `${pidFile} does not hold a usable pid`));
+        continue;
+      }
+      const record = plannedCommand('kill', ['-TERM', String(pid)]);
+
+      // A pid file outlives the process it named, and the kernel reuses that
+      // number. Signalling on the strength of the file alone is how a stop
+      // command kills a stranger's editor, so prove the process first.
+      let liveness = 'alive';
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        // EPERM means the pid exists but belongs to another user — never ours.
+        liveness = err?.code === 'EPERM' ? 'foreign' : 'gone';
+      }
+      if (liveness === 'foreign') {
+        record.output = `pid ${pid} belongs to another user, so it is not the ${label} deploy() started — nothing was signalled`;
+        notes.push(`Refused to signal pid ${pid}: ${pidFile} is stale and that pid now belongs to another user.`);
         commands.push(record);
         continue;
       }
+      if (liveness === 'gone') {
+        record.output = `no process ${pid} is running — the pid file was stale, so it was removed and nothing was signalled`;
+        fs.rmSync(pidFile, { force: true });
+        commands.push(record);
+        continue;
+      }
+
+      const { checked, command } = processCommand(pid);
+      if (!checked) {
+        record.output = `could not confirm what pid ${pid} is running, so nothing was signalled`;
+        notes.push(`This machine could not be asked what pid ${pid} is (no usable ps/tasklist). Check it yourself and stop it by hand rather than trusting ${pidFile}.`);
+        commands.push(record);
+        continue;
+      }
+      if (command === '') {
+        record.output = `pid ${pid} stopped on its own while it was being checked — nothing was signalled`;
+        fs.rmSync(pidFile, { force: true });
+        commands.push(record);
+        continue;
+      }
+      if (!looksLikeOurProcess(label, command)) {
+        record.output = `pid ${pid} is running ${JSON.stringify(command)}, which is not the ${label} deploy() started — nothing was signalled`;
+        notes.push(`Refused to signal pid ${pid}: ${pidFile} is stale and that pid now belongs to an unrelated process (${command}). Delete that file if you are sure.`);
+        commands.push(record);
+        continue;
+      }
+
       try {
         process.kill(pid, 'SIGTERM');
         record.ran = true;
         record.code = 0;
-        record.output = `sent SIGTERM to pid ${pid}`;
+        record.output = `sent SIGTERM to pid ${pid} (${command})`;
         fs.rmSync(pidFile, { force: true });
         if (label === 'instance') stopped = true;
       } catch (err) {
@@ -1350,7 +1484,7 @@ export async function stopInstance({ target = 'auto', appName = '', dataDir = DE
       }
       commands.push(record);
     }
-    notes.push(`Only pids written by deploy() are signalled, and only the ones under ${pidHome}.`);
+    notes.push(`Only a pid written by deploy() under ${pidHome} is signalled, and only while the process at that pid is still recognisably Credible.`);
   }
 
   notes.push('Nothing was deleted: the database, the launch agents and the unit files are all still in place.');

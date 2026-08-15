@@ -9,7 +9,7 @@
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
 [![Tests](https://github.com/maixmeduret/credible/actions/workflows/ci.yml/badge.svg)](https://github.com/maixmeduret/credible/actions/workflows/ci.yml)
 
-[Quickstart](#60-second-quickstart) · [AI setup](docs/AI-SETUP.md) · [Tracking](docs/TRACKING.md) · [API](docs/API.md) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
+[Quickstart](#60-second-quickstart) · [AI setup](docs/AI-SETUP.md) · [Where to host](docs/WHERE-TO-HOST.md) · [Tracking](docs/TRACKING.md) · [API](docs/API.md) · [Self-hosting](docs/SELF-HOSTING.md) · [Privacy](docs/PRIVACY.md) · [Comparison](docs/COMPARISON.md) · [Architecture](docs/ARCHITECTURE.md)
 
 </div>
 
@@ -185,7 +185,20 @@ looks like, the legal basis, and a DPA/GDPR FAQ — is in **[docs/PRIVACY.md](do
 
 ## Deployment
 
-Credible is one process listening on one port. Anything that can run Node can host it.
+Credible is one process listening on one port. Anything that can run Node can
+host it — and the best place is usually **the machine that already serves your
+site**. Mounted under a path of your own domain, the tracker becomes first-party:
+
+```bash
+credible proxy-config --domain yourdomain.com --server nginx --mode subpath
+```
+
+That prints the exact proxy block (Caddy, nginx, Apache, Traefik or HAProxy) and
+the environment variables to give the service, so the script is served from
+`https://yourdomain.com/stats/js/cr.js` on your own certificate — no
+cross-origin request, and no separate hostname for a blocklist to match. Which
+setups can do this, and what to do when yours cannot, is in
+**[docs/WHERE-TO-HOST.md](docs/WHERE-TO-HOST.md)**.
 
 **Docker**
 

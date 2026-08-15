@@ -17,6 +17,7 @@
  */
 import path from 'node:path';
 import process from 'node:process';
+import { execFileSync } from 'node:child_process';
 import { config, ensureDataDir } from '../src/config.js';
 import { getDb, all, optimize } from '../src/db/index.js';
 import { createUser, findUserByEmail, randomPassword, userCount, createApiKey } from '../src/auth/index.js';
@@ -65,6 +66,49 @@ const commands = {
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
+  },
+
+  /** Print the reverse-proxy block that puts Credible on the user's own domain. */
+  async 'proxy-config'() {
+    const { proxyConfig, suggestMounting, SUPPORTED } = await import('../src/proxy.js');
+    const domain = flags.domain || positional[0];
+    if (!domain) {
+      fail(
+        'Usage: credible proxy-config --domain monsite.fr [--server caddy|nginx|apache|traefik|haproxy]\n' +
+          '                            [--mode subpath|subdomain] [--path /stats] [--port 8000] [--json]',
+      );
+    }
+
+    const server = flags.server || detectWebServer();
+    if (!SUPPORTED.some((entry) => entry.server === server)) {
+      fail(`Unknown server "${server}". Supported: ${[...new Set(SUPPORTED.map((s) => s.server))].join(', ')}`);
+    }
+
+    const suggestion = suggestMounting(flags['site-url'] || `https://${domain}`);
+    const result = proxyConfig({
+      server,
+      mode: flags.mode || suggestion.mode,
+      domain,
+      path: flags.path || suggestion.path,
+      host: flags.host || '127.0.0.1',
+      port: Number(flags.port || config.port),
+    });
+
+    if (flags.json) {
+      log.print(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    log.print('');
+    log.print(`  Credible will answer on ${result.url}`);
+    log.print('');
+    log.print(result.config);
+    log.print('  Give the Credible service these variables:');
+    for (const [key, value] of Object.entries(result.env)) log.print(`    ${key}=${value}`);
+    log.print('');
+    log.print(`  Then: ${result.reload}`);
+    for (const note of result.notes || []) log.print(`  note  ${note}`);
+    log.print('');
   },
 
   /** Check an instance is actually usable, and say what to fix. */
@@ -399,6 +443,10 @@ const commands = {
                              [--target auto|local|tunnel|docker|fly] [--site-path .] [--json]
   deploy                   stand up a persistent instance
                              [--target …] [--port …] [--detect] [--dry-run] [--yes] [--json]
+  proxy-config             the reverse-proxy block that serves Credible from
+                           your own domain (first-party tracking)
+                             --domain monsite.fr [--server caddy|nginx|apache|traefik|haproxy]
+                             [--mode subpath|subdomain] [--path /stats] [--json]
   doctor                   check an instance is usable and say what to fix
                              [--url …] [--domain …] [--api-key …] [--json]
   serve                    start the HTTP server (default)
@@ -428,6 +476,19 @@ function csvCell(value) {
   if (value == null) return '';
   const str = String(value);
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+/** Whichever web server is already installed, so the default is usually right. */
+function detectWebServer() {
+  for (const [binary, server] of [['caddy', 'caddy'], ['nginx', 'nginx'], ['apache2ctl', 'apache'], ['httpd', 'apache']]) {
+    try {
+      execFileSync('command', ['-v', binary], { shell: true, stdio: 'ignore' });
+      return server;
+    } catch {
+      /* not installed — try the next one */
+    }
+  }
+  return 'caddy';
 }
 
 /** Where this instance answers, for snippets and links printed by the CLI. */
