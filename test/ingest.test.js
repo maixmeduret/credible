@@ -188,19 +188,21 @@ describe('sessionisation', () => {
 // --------------------------------------------------------------------------
 
 describe('what gets dropped', () => {
-  it('drops bots and blank user agents', () => {
-    assert.deepEqual(track({ path: '/' }, { timestamp: T, userAgent: GOOGLEBOT_UA }), {
-      status: 'ignored',
-      reason: 'bot',
-    });
-    assert.deepEqual(track({ path: '/' }, { timestamp: T, userAgent: '' }), {
-      status: 'ignored',
-      reason: 'bot',
-    });
-    assert.deepEqual(track({ path: '/' }, { timestamp: T, userAgent: 'curl/8.4.0' }), {
-      status: 'ignored',
-      reason: 'bot',
-    });
+  it('drops bots and blank user agents, and says which signal fired', () => {
+    // The signal is not decoration: "0 visitors" is the symptom of half a dozen
+    // different problems, and naming the rule that dropped an event is what
+    // makes `credible doctor` able to tell them apart.
+    const cases = [
+      [GOOGLEBOT_UA, 'ua_pattern'],
+      ['', 'ua_missing'],
+      ['curl/8.4.0', 'ua_pattern'],
+    ];
+    for (const [userAgent, signal] of cases) {
+      const result = track({ path: '/' }, { timestamp: T, userAgent });
+      assert.equal(result.status, 'ignored', userAgent || '(blank)');
+      assert.equal(result.reason, 'bot', userAgent || '(blank)');
+      assert.equal(result.signal, signal, userAgent || '(blank)');
+    }
     assert.equal(events().length, 0);
     assert.equal(visits().length, 0);
   });

@@ -12,6 +12,11 @@
  * the website's code, calls `credible_verify_install` to confirm events are
  * arriving, and answers questions about the traffic with the stats tools.
  *
+ * Everything the dashboard can do is reachable from here — saved segments,
+ * graph annotations, path exploration, the all-sites rollup, the traffic
+ * shields — because a feature an assistant cannot reach is, for this product,
+ * a feature that does not exist. `credible_help` is the map.
+ *
  *   CREDIBLE_URL      base URL of the instance   (default http://localhost:8000)
  *   CREDIBLE_API_KEY  API key used by every tool (optional — provision returns one)
  *
@@ -203,6 +208,29 @@ function httpError(result, method) {
   return new ToolError(`${method} ${result.url} returned ${result.status}: ${reported}.${hints[result.status] || ''}`);
 }
 
+/**
+ * GET an endpoint that only newer instances have.
+ *
+ * Credible keeps growing, and an assistant will meet instances of several ages.
+ * A 404 from one of these is a fact about the instance, not a mistake the model
+ * made — and the generic 404 hint ("check the spelling of the domain") would
+ * send it hunting for a typo that is not there. The router answers a missing
+ * route with exactly `Not found`, while a missing site says `Site not found`,
+ * so the two cases stay tellable apart.
+ */
+async function getOptional(path, opts, { feature, instead = '' }) {
+  const result = await request('GET', path, opts);
+  if (result.ok) return result.json ?? {};
+  if (result.status === 404 && /^not found\.?$/i.test(String(result.json?.error || ''))) {
+    throw new ToolError(
+      `this Credible instance does not provide ${feature} — GET ${result.url} answered 404 Not found, ` +
+        'which means the endpoint is not built into the version running here rather than that anything is wrong ' +
+        `with the request. Upgrade the instance to use it.${instead ? ` ${instead}` : ''}`,
+    );
+  }
+  throw httpError(result, 'GET');
+}
+
 // ------------------------------------------------------------ formatting --
 
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
@@ -279,6 +307,140 @@ function block(rows) {
 }
 
 /**
+ * A fixed-width table. Every row is an array of cells; the caller supplies the
+ * header row. The last column is never padded, so nothing trails whitespace.
+ */
+function table(rows) {
+  const widths = [];
+  for (const row of rows) {
+    row.forEach((cell, index) => {
+      widths[index] = Math.max(widths[index] || 0, String(cell).length);
+    });
+  }
+  return rows
+    .map((row) =>
+      row.map((cell, index) => (index === row.length - 1 ? String(cell) : String(cell).padEnd(widths[index] + 2))).join(''),
+    )
+    .join('\n');
+}
+
+const OPERATOR_WORDS = {
+  is: 'is',
+  is_not: 'is not',
+  contains: 'contains',
+  contains_not: 'does not contain',
+  matches: 'matches',
+  matches_not: 'does not match',
+};
+
+/** True for a list of filters, as opposed to a single one: [[…], […]]. */
+const isFilterList = (value) => Array.isArray(value) && value.length > 0 && value.every((item) => Array.isArray(item));
+
+/**
+ * One filter as prose: ["is","visit:country",["FR","BE"]] reads
+ * "visit:country is FR or BE".
+ *
+ * Combinators nest another filter where a dimension name would be, and are
+ * expanded recursively. Anything whose shape this does not recognise is printed
+ * as JSON rather than guessed at: a confidently wrong description of a filter
+ * is worse for the reader than the raw thing.
+ */
+function describeFilter(entry) {
+  if (!Array.isArray(entry) || entry.length < 2) return JSON.stringify(entry);
+  const [operator, key, values] = entry;
+
+  if (Array.isArray(key)) {
+    const inner = isFilterList(key) ? key : [key];
+    const parts = inner.map(describeFilter);
+    if (operator === 'and') return `(${parts.join(' AND ')})`;
+    if (operator === 'or') return `(${parts.join(' OR ')})`;
+    if (operator === 'not') return `NOT (${parts.join(' AND ')})`;
+    if (operator === 'has_done') return `has at some point: ${parts.join(' AND ')}`;
+    if (operator === 'has_not_done') return `has never: ${parts.join(' AND ')}`;
+    return JSON.stringify(entry);
+  }
+  if (typeof key !== 'string') return JSON.stringify(entry);
+
+  const word = OPERATOR_WORDS[operator] || operator;
+  const list = (Array.isArray(values) ? values : [values]).map((value) => String(value ?? '')).join(' or ');
+  return `${key} ${word} ${list}`.trimEnd();
+}
+
+/** Every filter of a segment, one indented line each. */
+const describeFilters = (filters, indent = '  ') =>
+  (Array.isArray(filters) ? filters : []).map((filter) => `${indent}${describeFilter(filter)}`).join('\n');
+
+/**
+ * The list inside a response, under whichever key it arrived.
+ *
+ * Journeys, the consolidated rollup and imports are being built by other hands
+ * while this file is written, so their envelopes are read tolerantly. Returns
+ * null — distinct from an empty list — when nothing array-shaped was found, so
+ * "the endpoint answered something else" never gets reported as "there is
+ * nothing to show".
+ */
+function pickList(data, keys) {
+  return [...keys.map((key) => data?.[key]), data].find(Array.isArray) ?? null;
+}
+
+/**
+ * A journey tree, level by level.
+ *
+ * The endpoint returns `steps` as one array per level, each node carrying the
+ * parent it came from — so the tree is rebuilt here by grouping a level on
+ * `from`, in the order the nodes arrive, which is already the parent's own rank
+ * order. Two parents sharing a name therefore stay apart.
+ */
+function journeyTree(data, requested) {
+  const root = data.root || {};
+  const backward = data.direction === 'backward';
+  const anchor = root.name || (backward ? 'every exit page' : 'every entry page');
+  const lines = [
+    `${backward ? 'Arriving at' : 'Starting from'} ${anchor} — ${count(root.visitors ?? data.total_visits ?? 0, 'visitor')}`,
+  ];
+
+  const levels = data.steps || [];
+  if (!levels.some((level) => level.length)) {
+    lines.push('', `  (nobody went any further than ${anchor} in this period)`);
+    return lines.join('\n');
+  }
+
+  levels.forEach((level, index) => {
+    if (!Array.isArray(level) || !level.length) return;
+    lines.push('', `Step ${index + 1}${backward ? ' back' : ''}`);
+    let parent = null;
+    for (const node of level) {
+      if (node.from !== undefined && node.from !== parent) {
+        parent = node.from;
+        if (parent) lines.push(`  ${backward ? 'before' : 'after'} ${parent}`);
+      }
+      const detail = [
+        count(node.visitors ?? 0, 'visitor'),
+        node.share == null ? '' : `${node.share}%`,
+        node.dropoff ? `${node.dropoff}% stopped here` : '',
+      ].filter(Boolean);
+      lines.push(`    ${node.name}${node.terminal ? ' (end of visit)' : ''} — ${detail.join(', ')}`);
+    }
+  });
+
+  if (levels.length < requested) {
+    lines.push('', `Only ${levels.length} step${levels.length === 1 ? '' : 's'} of the ${requested} asked for had anywhere left to go.`);
+  }
+  return lines.join('\n');
+}
+
+/** Said out loud when a response's shape is not one this tool can read. */
+const unrecognised = (header, data) =>
+  [
+    header,
+    '',
+    '  This instance answered with a shape this tool does not know how to read, so nothing is',
+    '  summarised below rather than something wrong. The raw response starts:',
+    '',
+    `  ${JSON.stringify(data).slice(0, 400)}`,
+  ].join('\n');
+
+/**
  * One line of a breakdown. The stats API returns four different row shapes
  * (dimensions, pages, custom properties, goals); this reads whichever columns
  * are present so every ranking is formatted by the same code.
@@ -353,6 +515,60 @@ function domainArg(args) {
     .toLowerCase();
 }
 
+/** Everything credible_configure_site may write, in the order it reads best. */
+const SETTING_FIELDS = [
+  'timezone',
+  'currency',
+  'excluded_paths',
+  'excluded_ips',
+  'excluded_countries',
+  'allowed_hostnames',
+  'bot_filtering',
+];
+
+/** The settings that hold a list, and so may also arrive as an actual array. */
+const LIST_SETTINGS = new Set(['excluded_paths', 'excluded_ips', 'excluded_countries', 'allowed_hostnames']);
+
+/**
+ * Read one credible_configure_site field.
+ *
+ * An empty string is a real value here — it is how a shield is cleared — so
+ * presence is what is tested, never truthiness.
+ *
+ * A list-shaped setting is accepted as an actual array too, the way `filters`
+ * is: a model just told "two-letter codes, comma separated" reaches for
+ * ["RU","CN"] about as readily as for "RU, CN", and both mean the same thing.
+ *
+ * Anything else is refused by name rather than dropped. That is the whole
+ * point of this function: a value of the wrong type used to fall through the
+ * `typeof === 'string'` test silently, so asking to shield two countries got
+ * back a cheerful "current settings" listing with no shield set and no error —
+ * the one failure mode where the caller is actively misled into believing the
+ * traffic is now being filtered.
+ */
+function settingArg(args, field) {
+  const value = args?.[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return value.trim();
+
+  if (Array.isArray(value) && LIST_SETTINGS.has(field)) {
+    return value
+      .filter((entry) => typeof entry === 'string' || typeof entry === 'number')
+      .map((entry) => String(entry).trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  const kind = Array.isArray(value) ? 'an array' : `${/^[aeiou]/.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
+  throw new ToolError(
+    `\`${field}\` must be a string, not ${kind}.` +
+      (LIST_SETTINGS.has(field)
+        ? ' Give the list comma separated ("RU, CN") or as an array of strings (["RU","CN"]).'
+        : '') +
+      (field === 'bot_filtering' ? ' Use "off", "standard" or "strict".' : ''),
+  );
+}
+
 const PERIODS = [
   'realtime',
   'day',
@@ -370,16 +586,80 @@ const PERIODS = [
   'custom',
 ];
 
-function periodArg(args) {
-  const period = optionalString(args, 'period') || '7d';
+/**
+ * Read and validate a period argument. `name`/`from`/`to` are parameters so the
+ * second period of credible_compare_periods is checked by the same code, and
+ * complains under its own argument names.
+ */
+function periodArg(args, { name = 'period', from = 'from', to = 'to', fallback = '7d' } = {}) {
+  const period = optionalString(args, name) || fallback;
   if (!PERIODS.includes(period)) {
-    throw new ToolError(`unknown period "${period}". Use one of: ${PERIODS.join(', ')}.`);
+    throw new ToolError(`unknown ${name} "${period}". Use one of: ${PERIODS.join(', ')}.`);
   }
-  if (period === 'custom' && !(args.from && args.to)) {
-    throw new ToolError('period "custom" needs both `from` and `to` as YYYY-MM-DD dates.');
+  if (period === 'custom' && !(args[from] && args[to])) {
+    throw new ToolError(`${name} "custom" needs both \`${from}\` and \`${to}\` as YYYY-MM-DD dates.`);
   }
   return period;
 }
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+function dateArg(args, name) {
+  const value = requiredString(args, name, 'Example: "2026-08-16".');
+  if (!YMD.test(value)) throw new ToolError(`\`${name}\` must be a date in YYYY-MM-DD form, e.g. "2026-08-16".`);
+  return value;
+}
+
+/**
+ * The `filters` argument, forwarded byte for byte.
+ *
+ * A model writes filters either as the JSON wire format already encoded, or as
+ * the array that format describes; both are accepted and exactly one
+ * JSON.stringify separates them. Nothing here inspects operators or dimensions.
+ * That is deliberate: filter forms this server has never heard of — nested
+ * and/or/not, has_done — must reach the instance intact, so a newer instance
+ * can honour them and an older one can answer 422 in its own words instead of
+ * this file silently dropping something the user asked for.
+ */
+function filterArg(args, name = 'filters') {
+  const value = args?.[name];
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'string') return value.trim() || undefined;
+  return JSON.stringify(value);
+}
+
+/**
+ * Resolve a `segment` argument to the id the stats endpoints want.
+ *
+ * An id passes straight through. A name costs one extra request and is worth
+ * it: a model that has just read "Mobile France" off a list should not have to
+ * go and look its number up before it can use it.
+ */
+async function segmentRef(args, domain, shared, { required = false } = {}) {
+  const raw = args?.segment;
+  if (raw === undefined || raw === null || raw === '') {
+    if (required) throw new ToolError('`segment` is required — the id or the exact name of a saved segment. credible_list_segments shows them.');
+    return undefined;
+  }
+
+  const value = String(raw).trim();
+  if (/^\d+$/.test(value)) return value;
+
+  const data = await api('GET', `/api/sites/${encodeURIComponent(domain)}/segments`, shared);
+  const segments = data.segments || [];
+  const found = segments.find((segment) => String(segment.name).toLowerCase() === value.toLowerCase());
+  if (found) return String(found.id);
+
+  throw new ToolError(
+    `no segment named "${value}" on ${domain}. ` +
+      (segments.length
+        ? `Saved segments: ${segments.map((segment) => `"${segment.name}" (id ${segment.id})`).join(', ')}.`
+        : 'This site has no saved segments yet — create one with credible_create_segment.'),
+  );
+}
+
+/** The applied segment, out of the list every dashboard payload carries. */
+const segmentFrom = (data, id) => (data.segments || []).find((segment) => String(segment.id) === String(id)) || null;
 
 /** The query parameters every stats endpoint understands. */
 const statsQuery = (args, period) => ({
@@ -387,7 +667,7 @@ const statsQuery = (args, period) => ({
   date: optionalString(args, 'date'),
   from: optionalString(args, 'from'),
   to: optionalString(args, 'to'),
-  filters: optionalString(args, 'filters'),
+  filters: filterArg(args),
   comparison: optionalString(args, 'comparison'),
 });
 
@@ -587,15 +867,37 @@ const PERIOD_PROP = {
     'Time range to report on. "day" is today, "7d"/"28d"/"30d"/"91d" are trailing windows, "month"/"last_month"/"year" are calendar periods, "all" is everything ever recorded, "custom" requires from and to. "realtime" is the live window — credible_get_stats switches to the who-is-on-the-site-now view (last 5 minutes), credible_breakdown ranks the last 30 minutes. Defaults to 7d.',
 };
 
+/**
+ * The filters argument, written once because it is the hardest thing in this
+ * schema to get right from memory — and because the syntax people expect (the
+ * Plausible one) is the syntax Credible rejects.
+ */
+const FILTERS_PROP = {
+  type: 'string',
+  description:
+    'Narrow every number to a subset of traffic. A JSON string (an actual array is accepted too) holding [operator, dimension, values] triples, e.g. ' +
+    '[["is","visit:country",["FR","BE"]],["contains","event:page",["/blog"]]] — entries are ANDed together, values inside one entry are ORed. ' +
+    'Operators: is, is_not, contains, contains_not, matches, matches_not (matches is a glob: * and ?, not a regex). ' +
+    'Dimensions are the same names credible_breakdown groups by, plus event:goal. ' +
+    'A triple can be replaced by a branch: ["and",[<node>,<node>]], ["or",[<node>,<node>]], ["not",<node>], ' +
+    '["has_done",<node>] for visitors who matched it at any point in the period rather than on the event being counted, and ["has_not_done",<node>] for those who never did. ' +
+    '"Visitors from France who saw pricing but never signed up" is [["is","visit:country",["FR"]],["has_done",["is","event:page",["/pricing"]]],["has_not_done",["is","event:goal",["Signup"]]]]. ' +
+    'Whatever you pass is forwarded to the instance untouched, so an older instance that does not know a form says so with a 422 rather than quietly ignoring it. ' +
+    'Plausible\'s string syntax ("visit:country==FR;visit:source!=Google") is NOT accepted and returns "filters must be valid JSON".',
+};
+
+const SEGMENT_PROP = {
+  type: 'string',
+  description:
+    'Apply a saved segment on top of any filters above — its id, or its exact name. credible_list_segments shows both. Optional.',
+};
+
 const RANGE_PROPS = {
   from: { type: 'string', description: 'Start date (YYYY-MM-DD). Only used when period is "custom".' },
   to: { type: 'string', description: 'End date, inclusive (YYYY-MM-DD). Only used when period is "custom".' },
   date: { type: 'string', description: 'Anchor date (YYYY-MM-DD) that the period is measured from. Defaults to today.' },
-  filters: {
-    type: 'string',
-    description:
-      'Optional filter expression applied to every number, e.g. "visit:country==FR", "event:page==/pricing", "visit:source!=Google". Combine with ";".',
-  },
+  filters: FILTERS_PROP,
+  segment: SEGMENT_PROP,
 };
 
 const schema = (properties, required = []) => ({
@@ -606,6 +908,80 @@ const schema = (properties, required = []) => ({
 });
 
 const TOOLS = [
+  {
+    name: 'credible_help',
+    description:
+      'A one-call map of everything this server can do, grouped by the question you are trying to answer, plus which instance it is pointed at and whether it has a credential yet. Call it when you have just been given this server mid-conversation and need to know what is on offer, when you are unsure which tool fits a request, or before telling someone that Credible cannot do something. It makes no network request, so it answers even when the instance is down.',
+    inputSchema: schema({}),
+    run: (args) => {
+      const base = baseUrl(args);
+      const key = keyFor(args);
+      return [
+        'Credible — self-hosted, privacy-first web analytics. This server drives an instance end to end:',
+        'set it up, install it, verify it, and read and explain the numbers.',
+        '',
+        block([
+          ['Instance', base],
+          ['Credential', key ? `${key.slice(0, 12)}… (in use for every call)` : 'none yet — call credible_provision, or set CREDIBLE_API_KEY'],
+        ]),
+        '',
+        section(
+          'Set it up',
+          block([
+            ['  credible_provision', 'fresh instance -> account, site, API key, <script> snippet. Start here.'],
+            ['  credible_list_sites', 'what this key can already see'],
+            ['  credible_add_site', 'another domain on an instance already set up'],
+            ['  credible_get_snippet', 'the exact <script> tag for a site'],
+            ['  credible_verify_install', 'is data arriving yet? Call it after editing the site'],
+            ['  credible_configure_site', 'timezone, excluded paths/IPs/countries, hostname allow-list, bot filtering'],
+            ['  credible_import_status', 'historical imports and how far along they are'],
+          ]),
+        ),
+        '',
+        section(
+          'Read the numbers',
+          block([
+            ['  credible_get_stats', 'headline metrics plus top sources, pages and countries'],
+            ['  credible_compare_periods', 'the same question over two periods, side by side'],
+            ['  credible_breakdown', 'rank one dimension: source, page, country, device, goal, custom property'],
+            ['  credible_realtime', 'who is on the site right now'],
+            ['  credible_journey', 'the paths visitors take from page to page'],
+            ['  credible_consolidated', 'every site on the instance in one rollup'],
+          ]),
+        ),
+        '',
+        section(
+          'Narrow and explain them',
+          block([
+            ['  filters', 'on any stats tool: [["is","visit:country",["FR"]]] — see the argument description'],
+            ['  credible_list_segments', 'filter sets somebody already named and saved'],
+            ['  credible_create_segment', 'name a filter set so it can be reused'],
+            ['  credible_apply_segment', 'run the dashboard through a saved segment'],
+            ['  credible_list_annotations', 'dated notes explaining what happened on the graph'],
+            ['  credible_add_annotation', 'record one: "we shipped X on this day"'],
+          ]),
+        ),
+        '',
+        section(
+          'Measure and share',
+          block([
+            ['  credible_create_goal', 'count a signup, a purchase, a page reached'],
+            ['  credible_create_funnel', '2-8 goals in order, to see where people drop out'],
+            ['  credible_track_event', 'record a conversion server-side, with props and revenue'],
+            ['  credible_share_dashboard', 'a public, optionally password-protected link'],
+          ]),
+        ),
+        '',
+        `Periods: ${PERIODS.join(' ')} (custom needs from and to).`,
+        'Every tool also takes instance_url and api_key, which override the environment for that one call —',
+        'that is how one registered server answers questions about staging and production in the same conversation.',
+        '',
+        'Knowing nothing about a site, this is usually the order: credible_list_sites, credible_get_stats,',
+        'then credible_breakdown on whatever looked surprising.',
+      ].join('\n');
+    },
+  },
+
   {
     name: 'credible_provision',
     description:
@@ -785,6 +1161,167 @@ const TOOLS = [
   },
 
   {
+    name: 'credible_configure_site',
+    description:
+      "Read or change a site's settings and its traffic shields. Call it with only `domain` to see how the site is configured; pass any other argument to change that one thing and leave the rest alone. " +
+      'Reach for it when the numbers are wrong for a reason that is not the tracker: your own team inflating them (excluded_ips), an admin area nobody should measure (excluded_paths), ' +
+      'a staging copy or a scraper mirror sending events under your data-domain (allowed_hostnames — an allow-list, so setting it rejects every hostname not on it), ' +
+      'a country sending nothing but junk (excluded_countries), or bots still getting through (bot_filtering: "strict" also drops headless and unknown clients). ' +
+      'Shields drop traffic at ingestion and are not retroactive — data already counted stays counted. Changing the timezone re-buckets every report from that point on. ' +
+      'To clear a setting, pass it as an empty string. This tool cannot make a dashboard public: use credible_share_dashboard for a read-only link.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        timezone: {
+          type: 'string',
+          description: 'IANA timezone the reports are bucketed in, e.g. "Europe/Paris". Days start and end in this zone.',
+        },
+        currency: { type: 'string', description: 'Three-letter currency for revenue goals, e.g. "USD".' },
+        excluded_paths: {
+          type: 'string',
+          description:
+            'Paths never to record, comma or newline separated (an actual array of strings is accepted too). "*" matches within one segment and "**" across them, e.g. "/admin/**, /preview/*".',
+        },
+        excluded_ips: {
+          type: 'string',
+          description:
+            'IP addresses never to record, comma separated (an actual array of strings is accepted too) — your office and your own machine, e.g. "203.0.113.7, 198.51.100.4".',
+        },
+        excluded_countries: {
+          type: 'string',
+          description:
+            'Two-letter country codes to drop on arrival, comma separated (an actual array of strings is accepted too), e.g. "RU, CN". Traffic with no known country is never dropped by this.',
+        },
+        allowed_hostnames: {
+          type: 'string',
+          description:
+            'Hostname allow-list, comma separated (an actual array of strings is accepted too), e.g. "example.com, *.example.com". When set, events from any other hostname are dropped — leave it empty to accept all.',
+        },
+        bot_filtering: {
+          type: 'string',
+          enum: ['off', 'standard', 'strict'],
+          description: '"standard" is the default User-Agent based filtering, "strict" also drops headless and unrecognised clients, "off" counts everything.',
+        },
+      },
+      ['domain'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
+
+      const patch = {};
+      for (const field of SETTING_FIELDS) {
+        const value = settingArg(args, field);
+        if (value !== undefined) patch[field] = value;
+      }
+      if (patch.bot_filtering !== undefined && !['off', 'standard', 'strict'].includes(patch.bot_filtering)) {
+        throw new ToolError('`bot_filtering` must be "off", "standard" or "strict".');
+      }
+
+      if (Object.keys(patch).length) {
+        await api('PATCH', `/api/sites/${encodeURIComponent(domain)}`, { ...shared, body: patch });
+      }
+
+      const detail = await api('GET', `/api/sites/${encodeURIComponent(domain)}`, shared);
+      const current = { ...(detail.settings || {}), ...(detail.site || {}) };
+
+      // Older instances do not report every shield back. Never present a value
+      // as confirmed when it was only accepted: say which is which.
+      const unconfirmed = [];
+      const value = (field) => {
+        if (current[field] !== undefined && current[field] !== null) return String(current[field]) || '(none)';
+        if (patch[field] !== undefined) {
+          unconfirmed.push(field);
+          return `${patch[field] || '(none)'}  (applied)`;
+        }
+        return null;
+      };
+
+      const lines = [
+        `${domain} — ${Object.keys(patch).length ? `${Object.keys(patch).length} setting${Object.keys(patch).length === 1 ? '' : 's'} updated` : 'current settings'}`,
+        '',
+        block([
+          ['Timezone', value('timezone')],
+          ['Currency', value('currency')],
+          ['Excluded paths', value('excluded_paths')],
+          ['Excluded IPs', value('excluded_ips')],
+          ['Excluded countries', value('excluded_countries')],
+          ['Allowed hostnames', value('allowed_hostnames')],
+          ['Bot filtering', value('bot_filtering')],
+          ['Public dashboard', current.public ? 'yes — anyone with the URL can read it' : 'no'],
+        ]),
+      ];
+
+      const silent = SETTING_FIELDS.filter((field) => current[field] === undefined || current[field] === null);
+      if (silent.length) {
+        lines.push(
+          '',
+          `This instance does not report ${silent.join(', ')} back in its site payload, so ${unconfirmed.length ? 'the values marked "(applied)" were accepted by the update but cannot be read back to confirm, and ' : ''}` +
+            'any value already set for them is not shown above.',
+        );
+      }
+      if (patch.timezone) {
+        lines.push('', `Reports for ${domain} are now bucketed in ${patch.timezone}. Past days are re-cut to that zone, so yesterday's totals may shift slightly.`);
+      }
+      return lines.join('\n');
+    },
+  },
+
+  {
+    name: 'credible_import_status',
+    description:
+      'List the historical data imports for a site and how far each has got. Use it to answer "is my old analytics data in yet?", to explain a sudden wall of history in the graph, or to check whether a period is complete before drawing conclusions from it — a range that is still importing is not a range you should compare against anything.',
+    inputSchema: schema({ domain: DOMAIN_PROP }, ['domain']),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const data = await getOptional(
+        `/api/sites/${encodeURIComponent(domain)}/imports`,
+        { instance_url: args.instance_url, apiKey: requireKey(args) },
+        {
+          feature: 'historical imports',
+          instead: 'Until then, every number for this site comes from events it recorded itself.',
+        },
+      );
+
+      const imports = pickList(data, ['imports', 'results']);
+      if (!imports) return unrecognised(`Imports on ${domain}`, data);
+      if (!imports.length) {
+        return `No imports on ${domain}. Every number for this site comes from events it recorded itself.`;
+      }
+
+      const rows = imports.map((entry, index) => {
+        const label = `${entry.id ? `#${entry.id} ` : ''}${entry.source || entry.provider || 'import'}`;
+        const status = entry.status || entry.state || 'unknown status';
+        const from = entry.from_date || entry.from;
+        const written = entry.events_written ?? entry.events ?? entry.rows;
+        const parts = [
+          entry.error ? `${status}: ${entry.error}` : status,
+          from ? `${from} to ${entry.to_date || entry.to || 'now'}` : '',
+          written == null ? '' : count(written, 'event'),
+          entry.aggregates_written ? `${fmt(entry.aggregates_written)} daily rollup rows` : '',
+          entry.rows_read == null ? '' : `${fmt(entry.rows_read)} rows read`,
+          entry.finished_at ? `finished ${isoStamp(entry.finished_at)}` : entry.started_at ? `started ${isoStamp(entry.started_at)}` : '',
+        ];
+        return `  ${String(index + 1).padStart(2)}. ${label} — ${parts.filter(Boolean).join(', ')}`;
+      });
+
+      const lines = [`${imports.length} import${imports.length === 1 ? '' : 's'} on ${domain}`, '', rows.join('\n')];
+      const running = imports.filter((entry) => String(entry.status || '').toLowerCase() === 'running');
+      if (running.length) {
+        lines.push(
+          '',
+          `${running.length} import${running.length === 1 ? ' is' : 's are'} still running. Any period it covers is incomplete — the numbers there will keep moving, so do not compare against them yet.`,
+        );
+      }
+      const failed = imports.filter((entry) => String(entry.status || '').toLowerCase() === 'failed');
+      if (failed.length) {
+        lines.push('', `${failed.length} failed. A failed import leaves a gap in the history, not a wrong number: the range it covers is simply missing.`);
+      }
+      return lines.join('\n');
+    },
+  },
+
+  {
     name: 'credible_get_stats',
     description:
       'The headline numbers for a site over a period: visitors, visits, pageviews, views per visit, bounce rate, visit duration, revenue, plus the top sources, pages and countries. This is the tool for "how is my site doing?" style questions. Pass comparison to get period-over-period change.',
@@ -810,60 +1347,121 @@ const TOOLS = [
         return realtimeReport(domain, shared, baseUrl(args));
       }
 
+      const segment = await segmentRef(args, domain, shared);
       const data = await api('GET', `/api/stats/${encodeURIComponent(domain)}/dashboard`, {
         ...shared,
-        query: statsQuery(args, period),
+        query: { ...statsQuery(args, period), segment },
       });
 
-      const m = data.metrics || {};
-      const changes = data.changes || {};
-      const currency = data.site?.currency || '';
-      // Bounce rate is a percentage already, so its change is in points.
-      const withChange = (key, value) => {
-        if (changes[key] == null) return `${value}`;
-        const label = key === 'bounce_rate' && changes[key] !== 0 ? `${changes[key] > 0 ? '+' : ''}${changes[key]} pts` : changeLabel(changes[key]);
-        return `${value}   (${label})`;
-      };
-      const range = data.period || {};
-      const panels = data.panels || {};
+      const notes = [];
+      const filters = filterArg(args);
+      if (filters) notes.push(`Filtered by: ${filters}`);
+      if (segment) {
+        const applied = segmentFrom(data, segment);
+        notes.push(`Segment applied: ${applied ? `"${applied.name}" (${describeFilters(applied.filters, '').replace(/\n/g, '; ')})` : `#${segment}`}`);
+      }
 
-      const zone = range.timezone || 'UTC';
-      const header = `${domain} — ${period}${range.start ? ` (${localDate(range.start, zone)} to ${localDate(range.end - 1, zone)}, ${zone})` : ''}`;
+      return dashboardReport({ domain, period, data, base: baseUrl(args), notes });
+    },
+  },
 
-      const parts = [
-        header,
+  {
+    name: 'credible_compare_periods',
+    description:
+      'Run the same question over two periods and lay the answers side by side, with the change on every metric. This is the tool for "how does this month compare with last month?", "are we better off than a year ago?", "did the redesign help?" — anything where the interesting number is a difference rather than a level. ' +
+      'Both periods can be anything, including two custom ranges, so it also answers "the fortnight after launch against the fortnight before". Filters and a segment apply to both sides, which is what makes a fair comparison. ' +
+      'For the simple "against the period immediately before" case, credible_get_stats with comparison=previous_period is one call instead of two.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        period: PERIOD_PROP,
+        compare_period: {
+          type: 'string',
+          enum: PERIODS.filter((period) => period !== 'realtime'),
+          description: 'The period to compare against, e.g. "last_month" or "custom" with compare_from and compare_to. Required.',
+        },
+        compare_from: { type: 'string', description: 'Start date (YYYY-MM-DD) of the comparison period. Only used when compare_period is "custom".' },
+        compare_to: { type: 'string', description: 'End date, inclusive (YYYY-MM-DD) of the comparison period. Only used when compare_period is "custom".' },
+        compare_date: { type: 'string', description: 'Anchor date (YYYY-MM-DD) the comparison period is measured from. Defaults to today.' },
+        ...RANGE_PROPS,
+      },
+      ['domain', 'compare_period'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const period = periodArg(args);
+      if (!optionalString(args, 'compare_period')) {
+        throw new ToolError(
+          '`compare_period` is required — the period to compare against, e.g. "last_month". ' +
+            'For the period immediately before this one, credible_get_stats with comparison=previous_period does it in a single call.',
+        );
+      }
+      const against = periodArg(args, { name: 'compare_period', from: 'compare_from', to: 'compare_to', fallback: '' });
+      if (period === 'realtime' || against === 'realtime') {
+        throw new ToolError('"realtime" is a live window, not a range, so there is nothing to compare it with. Use credible_realtime for who is on the site now.');
+      }
+
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
+      const segment = await segmentRef(args, domain, shared);
+      const query = { ...statsQuery(args, period), segment, comparison: undefined };
+      const path = `/api/stats/${encodeURIComponent(domain)}/dashboard`;
+
+      const [left, right] = await Promise.all([
+        api('GET', path, { ...shared, query }),
+        api('GET', path, {
+          ...shared,
+          query: {
+            ...query,
+            period: against,
+            date: optionalString(args, 'compare_date'),
+            from: optionalString(args, 'compare_from'),
+            to: optionalString(args, 'compare_to'),
+          },
+        }),
+      ]);
+
+      const a = left.metrics || {};
+      const b = right.metrics || {};
+      const currency = left.site?.currency || '';
+      const rows = [['', period, against, 'Change']];
+      for (const [key, label, render] of COMPARED_METRICS) {
+        rows.push([label, render(a[key], currency), render(b[key], currency), delta(key, a[key], b[key])]);
+      }
+      if (a.revenue || b.revenue) {
+        rows.push(['Revenue', money(a.revenue, currency), money(b.revenue, currency), delta('revenue', a.revenue, b.revenue)]);
+      }
+
+      const notes = [];
+      const filters = filterArg(args);
+      if (filters) notes.push(`Both sides filtered by: ${filters}`);
+      if (segment) {
+        const applied = segmentFrom(left, segment);
+        notes.push(`Both sides through segment ${applied ? `"${applied.name}"` : `#${segment}`}`);
+      }
+
+      return [
+        `${domain} — ${period} compared with ${against}`,
+        '',
+        visitorSentence(a.visitors, period, b.visitors, against),
+        '',
+        table(rows),
         '',
         block([
-          ['Visitors', withChange('visitors', fmt(m.visitors))],
-          ['Visits', withChange('visits', fmt(m.visits))],
-          ['Pageviews', withChange('pageviews', fmt(m.pageviews))],
-          ['Views / visit', withChange('views_per_visit', m.views_per_visit ?? 0)],
-          ['Bounce rate', withChange('bounce_rate', `${m.bounce_rate ?? 0}%`)],
-          ['Visit duration', withChange('visit_duration', humanDuration(m.visit_duration))],
-          ['Revenue', m.revenue ? money(m.revenue, currency) : null],
-          ['On site now', fmt(data.current_visitors)],
+          [period, rangeLabel(left.period)],
+          [against, rangeLabel(right.period)],
         ]),
+        ...(notes.length ? ['', notes.join('\n')] : []),
         '',
-        section('Top sources', ranked(panels.sources?.results, { currency })),
-        '',
-        section('Top pages', ranked(panels.pages?.results, { currency })),
-        '',
-        section('Top countries', ranked(panels.countries?.results, { currency })),
-      ];
-
-      if (data.has_goals && panels.goals?.results?.length) {
-        parts.push('', section('Goals', ranked(panels.goals.results, { empty: 'no conversions yet', currency })));
-      }
-      if (optionalString(args, 'filters')) parts.push('', `Filtered by: ${optionalString(args, 'filters')}`);
-      parts.push('', `Full dashboard: ${baseUrl(args)}/${domain}`);
-      return parts.join('\n');
+        `Change reads ${period} against ${against}. Full dashboard: ${baseUrl(args)}/${domain}`,
+      ].join('\n');
     },
   },
 
   {
     name: 'credible_breakdown',
     description:
-      'Group traffic by one dimension and rank it — the tool for "where do my visitors come from?", "which pages are most read?", "which countries?", "how are my goals converting?". Returns the ranked list with visitors, visits and pageviews for each entry.',
+      'Group traffic by one dimension and rank it — the tool for "where do my visitors come from?", "which pages are most read?", "which countries?", "how are my goals converting?". Returns the ranked list with visitors, visits and pageviews for each entry. ' +
+      'Reach for it after credible_get_stats whenever a headline number needs explaining: the totals say what happened, a breakdown says who or what it happened through. Narrow it with filters or a segment to ask the same question of one slice of the traffic.',
     inputSchema: schema(
       {
         domain: DOMAIN_PROP,
@@ -888,16 +1486,19 @@ const TOOLS = [
       const dimension = requiredString(args, 'dimension', 'Example: "visit:source".');
       const period = periodArg(args);
       const limit = Number.isInteger(args.limit) ? Math.min(Math.max(args.limit, 1), 500) : 10;
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
 
+      const segment = await segmentRef(args, domain, shared);
       const data = await api('GET', `/api/stats/${encodeURIComponent(domain)}/breakdown`, {
-        instance_url: args.instance_url,
-        apiKey: requireKey(args),
-        query: { ...statsQuery(args, period), dimension, limit },
+        ...shared,
+        query: { ...statsQuery(args, period), dimension, limit, segment },
       });
 
+      const filters = filterArg(args);
+      const narrowed = [filters ? `filtered: ${filters}` : '', segment ? `segment: ${segment}` : ''].filter(Boolean).join(', ');
       const results = data.results || [];
       const lines = [
-        `${domain} — ${dimension} over ${period}${optionalString(args, 'filters') ? ` (filtered: ${optionalString(args, 'filters')})` : ''}`,
+        `${domain} — ${dimension} over ${period}${narrowed ? ` (${narrowed})` : ''}`,
         '',
         ranked(results, { limit, empty: 'no data for this dimension in this period' }),
       ];
@@ -916,9 +1517,435 @@ const TOOLS = [
   },
 
   {
+    name: 'credible_journey',
+    description:
+      'Path exploration: the routes visitors actually take through the site, ranked by how many took each one. Use it for "what do people do after landing on the blog?", "how do the ones who convert get there?", "where do people go instead of the pricing page?" — questions about sequence, which a page ranking cannot answer because it counts each page in isolation. ' +
+      'Anchor it with start_page to follow visitors forward from a page, end_page to trace backwards from a destination, or both to see the routes between them; with neither, it returns the most common journeys on the site. ' +
+      'Journeys are within a single visit only — Credible keeps nothing that could link one visitor across days, so there is no cross-session path and never will be.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        start_page: { type: 'string', description: 'Only journeys that begin at this path, e.g. "/blog/launch". Optional.' },
+        end_page: { type: 'string', description: 'Only journeys that reach this path, e.g. "/signup". Optional; combine with start_page for the routes between two pages.' },
+        steps: {
+          type: 'integer',
+          minimum: 2,
+          maximum: 10,
+          description: 'How many pages deep each journey goes. Defaults to 3 — more steps means longer, rarer paths with smaller counts.',
+        },
+        group_directories: {
+          type: 'boolean',
+          description: 'Fold pages under a shared directory together, so /blog/a and /blog/b both count as /blog/*. Use it on sites with many URLs, where every path would otherwise be unique and every journey a count of one.',
+        },
+        period: PERIOD_PROP,
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many branches to keep per step, and how many whole paths to rank. Defaults to 10.' },
+        ...RANGE_PROPS,
+      },
+      ['domain'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const period = periodArg(args);
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
+      const steps = Number.isInteger(args.steps) ? Math.min(Math.max(args.steps, 2), 10) : 3;
+      const limit = Number.isInteger(args.limit) ? Math.min(Math.max(args.limit, 1), 100) : 10;
+
+      const data = await getOptional(
+        `/api/stats/${encodeURIComponent(domain)}/journey`,
+        {
+          ...shared,
+          query: {
+            ...statsQuery(args, period),
+            segment: await segmentRef(args, domain, shared),
+            start_page: optionalString(args, 'start_page'),
+            end_page: optionalString(args, 'end_page'),
+            steps,
+            limit,
+            // Only sent when asked for: an explicit `false` in the query string
+            // would read like a decision the model made rather than a default.
+            group_directories: args.group_directories === true ? 'true' : undefined,
+          },
+        },
+        {
+          feature: 'path exploration',
+          instead:
+            'In the meantime, credible_breakdown on visit:entry_page and visit:exit_page shows where visits start and end, which answers some of the same questions one step at a time.',
+        },
+      );
+
+      const anchors = [
+        optionalString(args, 'start_page') ? `from ${optionalString(args, 'start_page')}` : '',
+        optionalString(args, 'end_page') ? `to ${optionalString(args, 'end_page')}` : '',
+      ].filter(Boolean).join(' ');
+      const header = `${domain} — journeys over ${period}${anchors ? ` ${anchors}` : ''} (${steps} steps)`;
+
+      // Two answers are possible and both are useful: a tree of what happened
+      // after (or before) one page, and a flat ranking of whole paths. Render
+      // whichever arrived, and both when the endpoint sends both.
+      const parts = [header];
+      const tree = Array.isArray(data.steps) && data.steps.every(Array.isArray) ? data : null;
+      const paths = pickList(data, ['paths', 'journeys', 'results']);
+      if (!tree && !paths) return unrecognised(header, data);
+
+      if (tree) parts.push('', journeyTree(tree, steps));
+      if (paths?.length) {
+        parts.push(
+          '',
+          section(
+            'Most travelled paths',
+            paths
+              .slice(0, limit)
+              .map((path, index) => {
+                const walked = Array.isArray(path.steps)
+                  ? path.steps.map((step) => (typeof step === 'string' ? step : step?.name ?? JSON.stringify(step))).join(' -> ')
+                  : path.path || path.name || JSON.stringify(path);
+                const detail = [
+                  path.visitors == null ? '' : count(path.visitors, 'visitor'),
+                  path.share == null ? '' : `${path.share}%`,
+                  path.converted ? 'converted' : '',
+                ].filter(Boolean);
+                return `  ${String(index + 1).padStart(2)}. ${walked}${detail.length ? ` — ${detail.join(', ')}` : ''}`;
+              })
+              .join('\n'),
+          ),
+        );
+      }
+      if (!tree && !paths.length) {
+        parts.push('', `  (no journey reached ${steps} steps in this period — try fewer steps, a longer period, or drop the anchors)`);
+      }
+      if (data.truncated) {
+        parts.push('', 'Too many visits to follow all of them: this is the shape of a sample, not every path.');
+      }
+
+      parts.push('', `Full dashboard: ${baseUrl(args)}/${domain}`);
+      return parts.join('\n');
+    },
+  },
+
+  {
+    name: 'credible_consolidated',
+    description:
+      'One rollup across every site on the instance, ranked, with the totals. Use it when the question is about the whole account rather than one domain — "how is everything doing this month?", "which of my sites is growing?", "where did the traffic go?" — and as the first call when you do not yet know which site matters. It saves calling credible_get_stats once per domain, and unlike credible_list_sites it reports a period rather than only who is on each site this second.',
+    // No `segment` here: a segment belongs to one site, so there is nothing it
+    // could mean across all of them. Declaring it would be inviting the model to
+    // pass something this tool then quietly ignores.
+    inputSchema: schema({
+      period: PERIOD_PROP,
+      from: RANGE_PROPS.from,
+      to: RANGE_PROPS.to,
+      date: RANGE_PROPS.date,
+      filters: FILTERS_PROP,
+    }),
+    run: async (args) => {
+      const period = periodArg(args);
+      const base = baseUrl(args);
+      const data = await getOptional(
+        '/api/stats/consolidated',
+        { instance_url: args.instance_url, apiKey: requireKey(args), query: statsQuery(args, period) },
+        {
+          feature: 'the consolidated all-sites view',
+          instead: 'In the meantime, credible_list_sites gives the site list and credible_get_stats gives each one its numbers.',
+        },
+      );
+
+      const sites = pickList(data, ['sites', 'results']);
+      if (!sites) return unrecognised(`All sites on ${base} — ${period}`, data);
+      if (!sites.length) return `No sites to roll up on ${base}. Add one with credible_add_site.`;
+
+      const rows = sites.map((site, index) => {
+        const name = site.domain || site.name || '(unnamed)';
+        const parts = [count(site.visitors ?? 0, 'visitor')];
+        if (site.pageviews !== undefined) parts.push(count(site.pageviews, 'pageview'));
+        if (site.bounce_rate !== undefined) parts.push(`${site.bounce_rate}% bounce`);
+        if (site.change != null) parts.push(changeLabel(site.change));
+        if (site.current_visitors) parts.push(`${fmt(site.current_visitors)} on site now`);
+        if (site.revenue) parts.push(`${money(site.revenue, data.currency || '')} revenue`);
+        return `  ${String(index + 1).padStart(2)}. ${name} — ${parts.join(', ')}`;
+      });
+
+      const totals = data.totals || data.metrics || null;
+      const lines = [`All sites on ${base} — ${period}`, '', rows.join('\n')];
+
+      if (totals) {
+        lines.push(
+          '',
+          block([
+            ['Total visitors', fmt(totals.visitors)],
+            ['Total visits', totals.visits === undefined ? null : fmt(totals.visits)],
+            ['Total pageviews', totals.pageviews === undefined ? null : fmt(totals.pageviews)],
+            ['Bounce rate', totals.bounce_rate === undefined ? null : `${totals.bounce_rate}%`],
+            ['Visit duration', totals.visit_duration === undefined ? null : humanDuration(totals.visit_duration)],
+            ['Total revenue', totals.revenue ? money(totals.revenue, data.currency || '') : null],
+            ['On site now', totals.current_visitors === undefined ? null : fmt(totals.current_visitors)],
+            ['Sites', fmt(sites.length)],
+          ]),
+        );
+      } else {
+        lines.push('', `${sites.length} site${sites.length === 1 ? '' : 's'}.`);
+      }
+
+      if (data.top_pages?.length) {
+        lines.push(
+          '',
+          section(
+            'Top pages across every site',
+            data.top_pages
+              .slice(0, 10)
+              .map((page, index) => `  ${String(index + 1).padStart(2)}. ${page.name}${page.site ? ` (${page.site})` : ''} — ${count(page.visitors ?? 0, 'visitor')}`)
+              .join('\n'),
+          ),
+        );
+      }
+      if (data.top_sources?.length) {
+        lines.push('', section('Top sources across every site', ranked(data.top_sources)));
+      }
+
+      // A rollup is the one view whose caveats change the meaning of the
+      // numbers — mixed timezones, and a person counted once per site. The
+      // instance writes them; passing them on is not optional.
+      const notes = Array.isArray(data.notes) && data.notes.length
+        ? data.notes
+        : [data.timezone_note, data.visitors_note].filter(Boolean);
+      if (notes.length) {
+        lines.push('', section('Read these numbers with:', notes.map((note) => `  ${note}`).join('\n')));
+      }
+      return lines.join('\n');
+    },
+  },
+
+  {
+    name: 'credible_list_segments',
+    description:
+      'List the saved segments on a site — filter sets somebody has already named, like "Mobile France" or "Came from Hacker News". Call it before building filters by hand: if the segment already exists, applying it asks exactly the question the site owner considers meaningful, and the name is what they will recognise in your answer. Also the way to find the id or name that credible_apply_segment needs. Segments are either site-wide (everyone sees them) or personal to whoever saved them.',
+    inputSchema: schema({ domain: DOMAIN_PROP }, ['domain']),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const data = await api('GET', `/api/sites/${encodeURIComponent(domain)}/segments`, {
+        instance_url: args.instance_url,
+        apiKey: requireKey(args),
+      });
+
+      const segments = data.segments || [];
+      if (!segments.length) {
+        return `No saved segments on ${domain}. Create one with credible_create_segment, or filter ad hoc with the \`filters\` argument on credible_get_stats.`;
+      }
+
+      const blocks = segments.map((segment) => {
+        const owner = segment.scope === 'site' ? 'site-wide' : `personal to ${segment.owner_email || 'its owner'}`;
+        return [`  #${segment.id}  "${segment.name}"  (${owner})`, describeFilters(segment.filters, '        ')].join('\n');
+      });
+
+      return [
+        `${segments.length} saved segment${segments.length === 1 ? '' : 's'} on ${domain}`,
+        '',
+        blocks.join('\n\n'),
+        '',
+        'Apply one with credible_apply_segment, or pass its id or name as `segment` to credible_get_stats, credible_breakdown or credible_compare_periods.',
+      ].join('\n');
+    },
+  },
+
+  {
+    name: 'credible_create_segment',
+    description:
+      'Save a set of filters under a name so it can be reused in one argument instead of rebuilt every time. Use it when you have just worked out a filter combination that answers a question the owner will ask again — "paying customers from the newsletter", "everyone who reached checkout" — or when they describe an audience in words and you want that definition written down where the dashboard can see it too. ' +
+      'scope "site" shares it with everyone who can see the site; "personal" (the default) keeps it to the account this API key belongs to. The filters are validated on the way in, so a segment can never be the thing that breaks a query later.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        name: { type: 'string', description: 'What this audience is called, in the owner\'s words, e.g. "Mobile visitors from France". Up to 120 characters.' },
+        filters: {
+          type: 'array',
+          items: { type: 'array' },
+          description:
+            'The filters this segment stands for, as [operator, dimension, values] triples: [["is","visit:country",["FR"]],["is","visit:device",["Mobile"]]]. At least one is required. Same operators and dimensions as the filters argument elsewhere.',
+        },
+        scope: {
+          type: 'string',
+          enum: ['personal', 'site'],
+          description: '"site" makes it visible to everyone with access to the site; "personal" (default) keeps it to this account.',
+        },
+      },
+      ['domain', 'name', 'filters'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const name = requiredString(args, 'name');
+      const scope = optionalString(args, 'scope') || 'personal';
+      if (!['personal', 'site'].includes(scope)) throw new ToolError('`scope` must be "personal" or "site".');
+
+      const filters = filterArg(args);
+      if (!filters) {
+        throw new ToolError(
+          'a segment needs `filters` — at least one [operator, dimension, values] triple, e.g. [["is","visit:country",["FR"]]]. A segment with no filters would just be the whole site.',
+        );
+      }
+
+      const data = await api('POST', `/api/sites/${encodeURIComponent(domain)}/segments`, {
+        instance_url: args.instance_url,
+        apiKey: requireKey(args),
+        // The filters go over the wire in the same JSON the query string uses,
+        // so a form this server does not recognise is the instance's to judge.
+        body: { name, filters, scope },
+      });
+
+      const segment = data.segment || {};
+      return [
+        `Segment #${segment.id} "${segment.name || name}" saved on ${domain} (${segment.scope === 'site' ? 'site-wide' : 'personal to this account'}).`,
+        '',
+        describeFilters(segment.filters, '  '),
+        '',
+        `Apply it with credible_apply_segment, or pass segment: ${segment.id} to credible_get_stats, credible_breakdown or credible_compare_periods.`,
+      ].join('\n');
+    },
+  },
+
+  {
+    name: 'credible_apply_segment',
+    description:
+      'Run the dashboard through a saved segment and summarise what that audience did: the headline metrics plus their top sources, pages and countries. Use it whenever the question is about a named group rather than everybody — "how are our French mobile visitors doing?" — and after credible_create_segment to show what you just defined. ' +
+      'The segment stacks on top of any filters you also pass, so you can narrow a saved audience further without editing it. Give the segment by id or by its exact name; credible_list_segments has both.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        period: PERIOD_PROP,
+        ...RANGE_PROPS,
+        // After the spread: here the segment is the whole point, not an option.
+        segment: {
+          type: 'string',
+          description: 'The saved segment to apply: its id, or its exact name. Required. credible_list_segments shows what exists.',
+        },
+      },
+      ['domain', 'segment'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const period = periodArg(args);
+      if (period === 'realtime') {
+        throw new ToolError('the live view is not segmented — use credible_realtime for who is on the site now, or pick a period like "day" or "7d".');
+      }
+
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
+      const id = await segmentRef(args, domain, shared, { required: true });
+      const data = await api('GET', `/api/stats/${encodeURIComponent(domain)}/dashboard`, {
+        ...shared,
+        query: { ...statsQuery(args, period), segment: id },
+      });
+
+      const applied = segmentFrom(data, id);
+      const prefix = [
+        `Through segment ${applied ? `"${applied.name}" (#${applied.id}, ${applied.scope === 'site' ? 'site-wide' : 'personal'})` : `#${id}`}:`,
+        applied ? describeFilters(applied.filters, '  ') : '  (this account cannot see the segment definition, only its effect)',
+      ];
+      const filters = filterArg(args);
+      return dashboardReport({
+        domain,
+        period,
+        data,
+        base: baseUrl(args),
+        prefix,
+        notes: filters ? [`Narrowed further by: ${filters}`] : [],
+      });
+    },
+  },
+
+  {
+    name: 'credible_list_annotations',
+    description:
+      'Read the dated notes recorded against a site — deploys, launches, campaigns, outages. Call it before explaining any spike, dip or trend: an annotation turns "traffic tripled on the 14th" into "traffic tripled when we hit the front page of Hacker News", and guessing at a cause that is already written down is the easiest mistake to avoid here. With no period or dates it returns every annotation the site has.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        period: {
+          type: 'string',
+          enum: PERIODS,
+          description: 'Only annotations inside this period, resolved in the site\'s own timezone. Leave it out, with from and to, to get every annotation.',
+        },
+        from: { type: 'string', description: 'Earliest date to include (YYYY-MM-DD). Can be used without a period.' },
+        to: { type: 'string', description: 'Latest date to include, inclusive (YYYY-MM-DD). Can be used without a period.' },
+      },
+      ['domain'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const shared = { instance_url: args.instance_url, apiKey: requireKey(args) };
+      const from = optionalString(args, 'from');
+      const to = optionalString(args, 'to');
+      const period = optionalString(args, 'period');
+      if (period && !PERIODS.includes(period)) {
+        throw new ToolError(`unknown period "${period}". Use one of: ${PERIODS.join(', ')}.`);
+      }
+
+      let annotations;
+      let scopeLabel;
+      if (!from && !to && period && period !== 'all') {
+        // A period only means anything once it has been resolved in the site's
+        // timezone, and the dashboard endpoint does exactly that resolution
+        // before clipping the annotations to it. Asking it is one request and
+        // cannot disagree with the graph the notes are drawn on.
+        const data = await api('GET', `/api/stats/${encodeURIComponent(domain)}/dashboard`, {
+          ...shared,
+          query: { period },
+        });
+        annotations = data.annotations || [];
+        scopeLabel = `${period}, ${rangeLabel(data.period)}`;
+      } else {
+        const data = await api('GET', `/api/sites/${encodeURIComponent(domain)}/annotations`, {
+          ...shared,
+          query: { from, to },
+        });
+        annotations = data.annotations || [];
+        scopeLabel = from || to ? `${from || 'the beginning'} to ${to || 'today'}` : 'all time';
+      }
+
+      if (!annotations.length) {
+        return `No annotations on ${domain} for ${scopeLabel}. Record one with credible_add_annotation so the next person reading this graph knows what happened.`;
+      }
+      return [
+        `${annotations.length} annotation${annotations.length === 1 ? '' : 's'} on ${domain} — ${scopeLabel}`,
+        '',
+        block(annotations.map((note) => [note.date, `${note.text}${note.author_email ? `  — ${note.author_email}` : ''}`])),
+      ].join('\n');
+    },
+  },
+
+  {
+    name: 'credible_add_annotation',
+    description:
+      'Record a dated note on a site\'s graph: "shipped the new pricing page", "Hacker News front page", "CDN outage", "ad campaign started". Use it the moment you do something that could move the numbers — right after you deploy a change, launch a campaign, or fix an outage — so that next month\'s spike still has its explanation attached instead of being re-investigated from scratch. Notes are visible to everyone who can see the site.',
+    inputSchema: schema(
+      {
+        domain: DOMAIN_PROP,
+        date: { type: 'string', description: 'The day it happened, YYYY-MM-DD, in the site\'s timezone, e.g. "2026-08-16".' },
+        text: { type: 'string', description: 'What happened, in one line someone will understand in six months, e.g. "Shipped the redesigned pricing page". Up to 500 characters.' },
+      },
+      ['domain', 'date', 'text'],
+    ),
+    run: async (args) => {
+      const domain = domainArg(args);
+      const date = dateArg(args, 'date');
+      const text = requiredString(args, 'text', 'Example: "Shipped the redesigned pricing page".');
+
+      const data = await api('POST', `/api/sites/${encodeURIComponent(domain)}/annotations`, {
+        instance_url: args.instance_url,
+        apiKey: requireKey(args),
+        body: { date, text },
+      });
+
+      const note = data.annotation || {};
+      return [
+        `Noted on ${domain} for ${note.date || date}: "${note.text || text}"`,
+        '',
+        `It is drawn on the graph for any period covering that day, and credible_list_annotations returns it (annotation #${note.id}).`,
+      ].join('\n');
+    },
+  },
+
+  {
     name: 'credible_create_goal',
     description:
-      'Create a conversion goal so signups, purchases or key page visits are counted. Two kinds: an "event" goal fires when the site sends a custom event of that name, a "page" goal fires when a visitor reaches a path. Returns the goal id, which credible_create_funnel needs.',
+      'Create a conversion goal so signups, purchases or key page visits are counted. Two kinds: an "event" goal fires when the site sends a custom event of that name, a "page" goal fires when a visitor reaches a path. Returns the goal id, which credible_create_funnel needs. ' +
+      'Use it as soon as someone says what success looks like on their site — "I want to know how many people sign up" is a goal, and until one exists nothing is measuring it. A page goal starts counting immediately, including against traffic already recorded; an event goal only counts events the site sends from then on.',
     inputSchema: schema(
       {
         domain: DOMAIN_PROP,
@@ -983,7 +2010,8 @@ const TOOLS = [
   {
     name: 'credible_create_funnel',
     description:
-      'Build a funnel from existing goals to see where people drop off between steps. Needs between two and eight goal ids, in order — create the goals first with credible_create_goal, which returns their ids.',
+      'Build a funnel from existing goals to see where people drop off between steps. Needs between two and eight goal ids, in order — create the goals first with credible_create_goal, which returns their ids. ' +
+      'Use it when the question is not "how many converted?" but "where do we lose them?": a checkout, a signup flow, an onboarding sequence. Steps must be reached in order by the same visitor within one period, so list them the way a visitor actually walks them.',
     inputSchema: schema(
       {
         domain: DOMAIN_PROP,
@@ -1024,7 +2052,9 @@ const TOOLS = [
   {
     name: 'credible_share_dashboard',
     description:
-      'Create a public link to a site\'s dashboard so someone without an account can see the numbers. Optionally password protect it. Returns the URL to hand out.',
+      'Create a public link to a site\'s dashboard so someone without an account can see the numbers. Optionally password protect it. Returns the URL to hand out. ' +
+      'Use it when someone needs to be shown the stats rather than told them — a client, an investor, a teammate without a login — and prefer it to making the site public, since a link can be revoked and named. ' +
+      'It publishes real traffic data to anyone holding the URL, so only call it when that is what was actually asked for.',
     inputSchema: schema(
       {
         domain: DOMAIN_PROP,
@@ -1147,6 +2177,107 @@ const TOOLS = [
   },
 ];
 
+/** '2026-08-09 to 2026-08-15 (Europe/Paris)' for a resolved period. */
+const rangeLabel = (range = {}) => {
+  const zone = range.timezone || 'UTC';
+  return range.start ? `${localDate(range.start, zone)} to ${localDate(range.end - 1, zone)} (${zone})` : 'range not reported';
+};
+
+/**
+ * The dashboard payload, rendered.
+ *
+ * Shared by credible_get_stats and credible_apply_segment so a segmented view
+ * reads exactly like an unsegmented one — the only difference is the lines
+ * naming the segment, which is the point: the model should not have to learn a
+ * second layout to read the same numbers.
+ *
+ * @param {string[]} prefix lines placed under the header, before the metrics
+ * @param {string[]} notes  lines placed after the panels, before the URL
+ */
+function dashboardReport({ domain, period, data, base, prefix = [], notes = [] }) {
+  const m = data.metrics || {};
+  const changes = data.changes || {};
+  const currency = data.site?.currency || '';
+  // Bounce rate is a percentage already, so its change is in points.
+  const withChange = (key, value) => {
+    if (changes[key] == null) return `${value}`;
+    const label = key === 'bounce_rate' && changes[key] !== 0 ? `${changes[key] > 0 ? '+' : ''}${changes[key]} pts` : changeLabel(changes[key]);
+    return `${value}   (${label})`;
+  };
+  const range = data.period || {};
+  const panels = data.panels || {};
+  const zone = range.timezone || 'UTC';
+
+  const parts = [
+    `${domain} — ${period}${range.start ? ` (${localDate(range.start, zone)} to ${localDate(range.end - 1, zone)}, ${zone})` : ''}`,
+    ...(prefix.length ? ['', ...prefix] : []),
+    '',
+    block([
+      ['Visitors', withChange('visitors', fmt(m.visitors))],
+      ['Visits', withChange('visits', fmt(m.visits))],
+      ['Pageviews', withChange('pageviews', fmt(m.pageviews))],
+      ['Views / visit', withChange('views_per_visit', m.views_per_visit ?? 0)],
+      ['Bounce rate', withChange('bounce_rate', `${m.bounce_rate ?? 0}%`)],
+      ['Visit duration', withChange('visit_duration', humanDuration(m.visit_duration))],
+      ['Revenue', m.revenue ? money(m.revenue, currency) : null],
+      ['On site now', fmt(data.current_visitors)],
+    ]),
+    '',
+    section('Top sources', ranked(panels.sources?.results, { currency })),
+    '',
+    section('Top pages', ranked(panels.pages?.results, { currency })),
+    '',
+    section('Top countries', ranked(panels.countries?.results, { currency })),
+  ];
+
+  if (data.has_goals && panels.goals?.results?.length) {
+    parts.push('', section('Goals', ranked(panels.goals.results, { empty: 'no conversions yet', currency })));
+  }
+  // Annotations explain the shape of the graph, so they belong with the numbers
+  // rather than in a tool the model has to know to call separately.
+  if (Array.isArray(data.annotations) && data.annotations.length) {
+    parts.push('', section('What happened in this period', block(data.annotations.map((note) => [`  ${note.date}`, note.text]))));
+  }
+  if (notes.length) parts.push('', notes.join('\n'));
+  parts.push('', `Full dashboard: ${base}/${domain}`);
+  return parts.join('\n');
+}
+
+/** The metrics credible_compare_periods puts side by side, in reading order. */
+const COMPARED_METRICS = [
+  ['visitors', 'Visitors', (value) => fmt(value)],
+  ['visits', 'Visits', (value) => fmt(value)],
+  ['pageviews', 'Pageviews', (value) => fmt(value)],
+  ['views_per_visit', 'Views / visit', (value) => String(value ?? 0)],
+  ['bounce_rate', 'Bounce rate', (value) => `${value ?? 0}%`],
+  ['visit_duration', 'Visit duration', (value) => humanDuration(value)],
+];
+
+/** How the first period compares with the second, one metric at a time. */
+function delta(metric, current, previous) {
+  const now = Number(current || 0);
+  const before = Number(previous || 0);
+  // A bounce rate is already a percentage: the honest difference is in points.
+  if (metric === 'bounce_rate') {
+    const diff = Math.round(now - before);
+    return diff === 0 ? 'no change' : `${diff > 0 ? '+' : ''}${diff} pts`;
+  }
+  if (!before) return now > 0 ? 'new' : 'no change';
+  return changeLabel(Math.round(((now - before) / before) * 100));
+}
+
+/** The comparison in one sentence, written to be read out loud. */
+function visitorSentence(current, currentLabel, previous, previousLabel) {
+  const now = Number(current || 0);
+  const before = Number(previous || 0);
+  if (!before) {
+    return `${count(now, 'visitor')} over ${currentLabel}. ${previousLabel} had none, so there is no percentage worth quoting.`;
+  }
+  const percent = Math.round(((now - before) / before) * 100);
+  const direction = percent === 0 ? 'level with' : percent > 0 ? `up ${percent}% on` : `down ${Math.abs(percent)}% on`;
+  return `${count(now, 'visitor')} over ${currentLabel}, ${direction} the ${count(before, 'visitor')} over ${previousLabel}.`;
+}
+
 /** Shared by credible_realtime and credible_get_stats(period=realtime). */
 async function realtimeReport(domain, shared, base) {
   const data = await api('GET', `/api/stats/${encodeURIComponent(domain)}/realtime`, shared);
@@ -1187,7 +2318,8 @@ function initialize(params) {
       'it creates the account and the site and returns an API key (remembered for the session) plus the <script> ' +
       'snippet to install in the site\'s <head>. After editing the website code, call credible_verify_install to ' +
       'confirm events are arriving, then use credible_get_stats, credible_breakdown and credible_realtime to ' +
-      'answer questions about the traffic.',
+      'answer questions about the traffic. credible_help lists everything else in one call — comparisons, ' +
+      'journeys, saved segments, annotations, the all-sites rollup and the traffic shields.',
   };
 }
 

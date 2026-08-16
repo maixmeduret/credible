@@ -3,7 +3,8 @@
  *
  * A panel owns its tabs, knows which key of the combined dashboard payload
  * pre-fills its default tab, and fetches lazily for every other tab. Clicking a
- * row adds a filter; the expand button opens the full list in a modal.
+ * row adds a filter; the expand button opens the full list in a modal, where
+ * every column can be sorted and the choice is remembered per tab.
  */
 import { append, clear, h, icon, modal, replace } from './dom.js';
 import {
@@ -16,6 +17,62 @@ import {
 } from './format.js';
 
 const DEFAULT_COLUMNS = [{ key: 'visitors', label: 'Visitors', format: shortNumber }];
+
+/**
+ * The sort chosen in an expanded report, kept per tab.
+ *
+ * Reading and writing are both guarded: localStorage throws outright in a
+ * private window in some browsers, and a report that will not open is a worse
+ * bug than a sort order that will not stick.
+ */
+const SORT_PREFIX = 'credible.sort.';
+
+function readSort(tabId) {
+  try {
+    const raw = localStorage.getItem(SORT_PREFIX + tabId);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.key === 'string' ? { key: parsed.key, dir: parsed.dir === 'asc' ? 'asc' : 'desc' } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSort(tabId, sort) {
+  try {
+    if (sort) localStorage.setItem(SORT_PREFIX + tabId, JSON.stringify(sort));
+    else localStorage.removeItem(SORT_PREFIX + tabId);
+  } catch {
+    /* storage unavailable — the sort still applies for this session */
+  }
+}
+
+/**
+ * Sorting happens here rather than in the query: an expanded report is at most
+ * a hundred rows the browser already has, and re-fetching to reorder them
+ * would empty the modal for a round trip.
+ */
+function sortItems(items, sort) {
+  if (!sort) return items;
+  const direction = sort.dir === 'asc' ? 1 : -1;
+  const value = (item) => {
+    if (sort.key === 'name') return null;
+    const n = Number(item[sort.key]);
+    return Number.isFinite(n) ? n : null;
+  };
+  return items.slice().sort((a, b) => {
+    if (sort.key === 'name') {
+      return direction * String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { numeric: true });
+    }
+    const av = value(a);
+    const bv = value(b);
+    // Rows with no number for this column ("—") sit at the bottom either way.
+    if (av === null && bv === null) return 0;
+    if (av === null) return 1;
+    if (bv === null) return -1;
+    return direction * (av - bv);
+  });
+}
 
 /** How a row's label is decorated, per dimension. */
 function decorate(dimension, name) {
@@ -34,6 +91,8 @@ function decorate(dimension, name) {
 function emptyState(message) {
   return h('div', { class: 'empty' }, message);
 }
+
+const flip = (dir) => (dir === 'asc' ? 'desc' : 'asc');
 
 /**
  * @param {object} spec  { tabs, defaultTab }
@@ -133,6 +192,38 @@ export function createPanel(spec, ctx) {
     );
   }
 
+  /** The same header, with every column a button that reorders the list. */
+  function sortableHeader(tab, sort, onSort) {
+    const columns = tab.columns || DEFAULT_COLUMNS;
+    const cell = (key, label, fallbackDir) => {
+      const active = sort && sort.key === key;
+      const next = active && sort.dir === fallbackDir ? flip(fallbackDir) : fallbackDir;
+      return h(
+        'span',
+        {},
+        h(
+          'button',
+          {
+            class: 'link-btn',
+            type: 'button',
+            'aria-label': `Sort by ${label}, ${next === 'asc' ? 'ascending' : 'descending'}`,
+            onClick: () => onSort({ key, dir: next }),
+          },
+          label,
+          active ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : '',
+        ),
+      );
+    };
+
+    return h(
+      'div',
+      { class: 'panel-head' },
+      // Names read alphabetically, numbers read biggest-first.
+      cell('name', tab.head || 'Name', 'asc'),
+      h('span', { class: 'cols' }, ...columns.map((column) => cell(column.key, column.label, 'desc'))),
+    );
+  }
+
   async function dataFor(tab, { limit = 9, offset = 0, force = false } = {}) {
     if (!force && offset === 0 && tab.dataKey && payload?.panels?.[tab.dataKey]) {
       return payload.panels[tab.dataKey];
@@ -205,16 +296,54 @@ export function createPanel(spec, ctx) {
         h('button', { class: 'btn ghost icon', type: 'button', onClick: () => close() }, icon('close', 16)),
       ),
     );
+
     if (tab.custom) {
-      wrapper.appendChild(await tab.custom({ ...ctx, payload, expanded: true }));
+      try {
+        wrapper.appendChild(await tab.custom({ ...ctx, payload, expanded: true }));
+      } catch (err) {
+        wrapper.appendChild(emptyState(err.message));
+      }
       return;
     }
+
     const expandedTab = { ...tab, columns: tab.expandedColumns || tab.columns || DEFAULT_COLUMNS };
-    wrapper.appendChild(header(expandedTab));
-    const data = await dataFor(tab, { limit: 100, force: true });
-    wrapper.appendChild(
-      data.results?.length ? rowsFor(expandedTab, data.results) : emptyState('No data for this period'),
-    );
+    let sort = readSort(tab.id);
+    // A fixed-height body means the header does not jump when the rows land.
+    const body = h('div', { style: { minHeight: '240px', display: 'flex', flexDirection: 'column' } });
+    let items = null;
+
+    const paint = () => {
+      clear(body);
+      body.appendChild(
+        sortableHeader(expandedTab, sort, (next) => {
+          sort = next;
+          writeSort(tab.id, next);
+          paint();
+        }),
+      );
+      if (items === null) {
+        body.appendChild(emptyState('…'));
+        return;
+      }
+      if (!items.length) {
+        body.appendChild(emptyState('No data for this period'));
+        return;
+      }
+      body.appendChild(rowsFor(expandedTab, sortItems(items, sort)));
+    };
+
+    wrapper.appendChild(body);
+    paint();
+
+    try {
+      const data = await dataFor(tab, { limit: 100, force: true });
+      items = data.results || [];
+    } catch (err) {
+      clear(body);
+      body.appendChild(emptyState(err.message));
+      return;
+    }
+    paint();
   }
 
   return {

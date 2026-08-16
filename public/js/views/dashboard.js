@@ -21,6 +21,13 @@ import {
   SOURCES_PANEL,
   createPanel,
 } from '../panels.js';
+import {
+  createAnnotationLayer,
+  createSegmentsControl,
+  openAnnotationDialog,
+  openAnnotationsDialog,
+  segmentChip,
+} from '../segments-ui.js';
 
 const FILTER_LABELS = {
   'visit:channel': 'Channel',
@@ -42,6 +49,23 @@ const FILTER_LABELS = {
   'event:goal': 'Goal',
   'event:name': 'Event',
 };
+
+/** The keyboard map, in the order the ? dialog lists it. */
+const SHORTCUTS = [
+  ['?', 'Show this list'],
+  ['D', 'Today'],
+  ['W', 'Last 7 days'],
+  ['M', 'Month to date'],
+  ['Y', 'Year to date'],
+  ['←  →', 'Step the period back and forward'],
+  ['F', 'Open the filter menu'],
+  ['S', 'Open the segments menu'],
+  ['X', 'Clear every filter and segment'],
+  ['Esc', 'Close the open menu or dialog'],
+];
+
+/** Which period each letter selects. */
+const PERIOD_KEYS = { d: 'day', w: '7d', m: 'month', y: 'year' };
 
 const EXPLORE_DIMENSIONS = [
   ['event:page', 'Page'],
@@ -68,7 +92,13 @@ const EXPLORE_DIMENSIONS = [
 export async function renderDashboard(container, ctx) {
   const { api, domain, shared = false } = ctx;
 
-  let query = ctx.currentQuery();
+  let query = { ...ctx.currentQuery() };
+  // currentQuery() in app.js predates saved segments and does not carry
+  // `segment` yet, so it is read straight off the URL. setQuery() writes back
+  // every key it is handed, so the round trip already works; the day app.js
+  // learns about segments this line quietly stops doing anything.
+  if (query.segment == null) query.segment = new URLSearchParams(location.search).get('segment') || '';
+
   let data = null;
   let metric = localStorage.getItem('credible.metric') || 'visitors';
   if (!METRICS[metric]) metric = 'visitors';
@@ -80,6 +110,19 @@ export async function renderDashboard(container, ctx) {
   const nextBtn = h('button', { class: 'btn icon', type: 'button', title: 'Next period' }, icon('right', 15));
   const filterBtn = h('button', { class: 'btn ghost', type: 'button' }, icon('filter', 15), 'Filter');
   const moreBtn = h('button', { class: 'btn ghost icon', type: 'button', title: 'More' }, icon('more', 15));
+
+  // Writing a segment or a note needs an account: a shared link may read them
+  // but never create one, and the API says so with a 403 either way.
+  const canEdit = !shared && Boolean(ctx.state.user);
+
+  const segments = createSegmentsControl({
+    domain,
+    canEdit,
+    getFilters: () => parseFilters(query.filters),
+    getActiveId: () => query.segment,
+    onApply: (id) => update({ segment: id }),
+    onChanged: () => load(),
+  });
 
   const siteButton = h(
     'button',
@@ -96,7 +139,10 @@ export async function renderDashboard(container, ctx) {
     liveEl,
     h(
       'div',
-      { class: 'sitebar-right' },
+      // Four controls no longer fit on one line at 375px, and .sitebar-right
+      // does not wrap in the stylesheet — which this file may not edit.
+      { class: 'sitebar-right', style: { flexWrap: 'wrap' } },
+      segments.el,
       filterBtn,
       h('div', { class: 'stepper' }, dateBtn, prevBtn, nextBtn),
       shared ? null : moreBtn,
@@ -111,10 +157,26 @@ export async function renderDashboard(container, ctx) {
 
   append(container, sitebar, filtersEl, metricsEl, chartCard, grid);
 
+  const noteLayer = createAnnotationLayer({
+    host: chartHost,
+    canEdit,
+    onAdd: (date) => openAnnotationDialog({ domain, date, onSaved: () => load() }),
+    onOpen: (date) =>
+      openAnnotationsDialog({
+        domain,
+        annotations: data?.annotations || [],
+        canEdit,
+        date,
+        onChanged: () => load(),
+      }),
+  });
+
   // --------------------------------------------------------------- panels --
   const onFilter = (key, value) => {
     const filters = parseFilters(query.filters);
-    if (filters.some(([, k, values]) => k === key && values.includes(value))) return;
+    // Only leaves can duplicate; a branch node has no values array to inspect.
+    const already = filters.some(([, k, values]) => k === key && Array.isArray(values) && values.includes(value));
+    if (already) return;
     filters.push(['is', key, [value]]);
     update({ filters: JSON.stringify(filters) });
   };
@@ -204,20 +266,37 @@ export async function renderDashboard(container, ctx) {
       format: spec.format,
       incompleteIndex,
     });
+
+    // drawChart() empties .chart-host, so the note markers are hung back up
+    // afterwards, every time, and read their geometry off what it just drew.
+    noteLayer.update({ points: data.timeseries, annotations: data.annotations || [] });
   }
 
   function paintFilters() {
     clear(filtersEl);
+    const active = segments.active();
     const filters = parseFilters(query.filters);
-    if (!filters.length) return;
+    if (active) filtersEl.appendChild(segmentChip(active, () => update({ segment: '' })));
 
     filters.forEach(([operator, key, values], index) => {
+      // A filter tree can also carry branch nodes — ["and", [...]], ["not", …],
+      // ["has_done", …] — which arrive from a saved segment or the API and have
+      // no dimension and no value list to print. They still deserve a chip that
+      // can be removed, so summarise them instead of reaching into `values`.
+      const isLeaf = Array.isArray(values) && typeof key === 'string';
+      const label = isLeaf
+        ? `${FILTER_LABELS[key] || key} ${operator === 'is' ? 'is' : operator.replace(/_/g, ' ')} `
+        : `${operator.replace(/_/g, ' ')} `;
+      const value = isLeaf
+        ? (key === 'visit:country' ? values.map(countryName).join(', ') : values.join(', '))
+        : 'grouped condition';
+
       filtersEl.appendChild(
         h(
           'span',
-          { class: 'chip' },
-          `${FILTER_LABELS[key] || key} ${operator === 'is' ? 'is' : operator.replace('_', ' ')} `,
-          h('b', {}, key === 'visit:country' ? values.map(countryName).join(', ') : values.join(', ')),
+          { class: 'chip', title: isLeaf ? '' : JSON.stringify(filters[index]) },
+          label,
+          h('b', {}, value),
           h(
             'button',
             {
@@ -235,11 +314,18 @@ export async function renderDashboard(container, ctx) {
       );
     });
 
-    if (filters.length > 1) {
+    // One chip already carries its own ×; "Clear all" only earns its place once
+    // there are two things to clear, and a segment counts as one of them.
+    if (filters.length + (active ? 1 : 0) > 1) {
       filtersEl.appendChild(
-        h('button', { class: 'link-btn', type: 'button', onClick: () => update({ filters: '' }) }, 'Clear all'),
+        h('button', { class: 'link-btn', type: 'button', onClick: clearEverything }, 'Clear all'),
       );
     }
+  }
+
+  function clearEverything() {
+    if (!query.filters && !query.segment) return;
+    update({ filters: '', segment: '' });
   }
 
   function paintPeriod() {
@@ -289,13 +375,31 @@ export async function renderDashboard(container, ctx) {
   });
   moreBtn.addEventListener('click', () => {
     const menu = h('div', {});
+    const noteCount = data?.annotations?.length || 0;
     menu.append(
       h('button', { type: 'button', onClick: () => { close(); ctx.navigate(`/${domain}/settings`); } }, 'Site settings', icon('settings', 15)),
+      h(
+        'button',
+        { type: 'button', onClick: () => { close(); openNotes(); } },
+        'Notes on this period',
+        h('span', { class: 'notice' }, String(noteCount)),
+      ),
       h('button', { type: 'button', onClick: () => { close(); exportCsv(); } }, 'Export as CSV'),
       h('button', { type: 'button', onClick: () => { close(); shareDialog(ctx, domain); } }, 'Share dashboard'),
+      h('hr'),
+      h('button', { type: 'button', onClick: () => { close(); openShortcuts(); } }, 'Keyboard shortcuts', h('span', { class: 'notice' }, '?')),
     );
     const close = popover(moreBtn, menu);
   });
+
+  function openNotes() {
+    openAnnotationsDialog({
+      domain,
+      annotations: data?.annotations || [],
+      canEdit,
+      onChanged: () => load(),
+    });
+  }
 
   function exportCsv() {
     if (!data) return;
@@ -326,6 +430,10 @@ export async function renderDashboard(container, ctx) {
       const next = await api.dashboard(domain, query);
       if (token !== loadToken) return;
       data = next;
+      segments.setSegments(data.segments);
+      // The chip was drawn from the URL alone a moment ago; this is only the
+      // real name arriving, so nothing moves.
+      paintFilters();
       paintMetrics();
       paintLive();
       await paintChart();
@@ -341,11 +449,89 @@ export async function renderDashboard(container, ctx) {
     }
   }
 
+  // ------------------------------------------------------------ shortcuts --
+
+  /**
+   * One global key handler for the whole dashboard.
+   *
+   * It stands down whenever the keystroke belongs to someone else: a field, the
+   * chart (which walks its own buckets with the arrows), or an open menu or
+   * dialog — those already close themselves on Escape, and a bare `d` should
+   * not reshuffle the page behind them.
+   */
+  function onKeyDown(event) {
+    if (!container.isConnected) {
+      teardown();
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+    const target = event.target;
+    const tag = (target && target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (target && target.isContentEditable) return;
+    if (target && typeof target.closest === 'function' && target.closest('.chart-host')) return;
+    if (document.querySelector('.backdrop, .menu')) return;
+
+    const key = event.key;
+    if (key === '?') {
+      event.preventDefault();
+      openShortcuts();
+      return;
+    }
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      const next = shiftPeriod(query, key === 'ArrowLeft' ? -1 : 1);
+      if (!next) return;
+      event.preventDefault();
+      update(next);
+      return;
+    }
+
+    const letter = key.length === 1 ? key.toLowerCase() : '';
+    if (PERIOD_KEYS[letter]) {
+      event.preventDefault();
+      update({ period: PERIOD_KEYS[letter], date: '', from: '', to: '' });
+      return;
+    }
+    if (letter === 'f') {
+      event.preventDefault();
+      filterBtn.focus();
+      openFilterMenu(filterBtn, query, update, api, domain);
+      return;
+    }
+    if (letter === 's') {
+      event.preventDefault();
+      segments.el.focus();
+      segments.open();
+      return;
+    }
+    if (letter === 'x') {
+      event.preventDefault();
+      clearEverything();
+    }
+  }
+
+  let timer = null;
+  function teardown() {
+    if (timer) clearInterval(timer);
+    document.removeEventListener('keydown', onKeyDown);
+    noteLayer.destroy();
+  }
+
+  document.addEventListener('keydown', onKeyDown);
+  window.addEventListener('popstate', teardown, { once: true });
+
   paintMetrics();
   paintPeriod();
   await load();
 
-  const timer = setInterval(async () => {
+  timer = setInterval(async () => {
+    // Navigating inside the app replaces the container without a popstate, so
+    // the poller checks that it is still on screen before it costs a request.
+    if (!container.isConnected) {
+      teardown();
+      return;
+    }
     if (!document.hasFocus()) return;
     try {
       const realtime = await api.realtime(domain, { auth: query.auth });
@@ -357,7 +543,6 @@ export async function renderDashboard(container, ctx) {
       /* transient */
     }
   }, 15000);
-  window.addEventListener('popstate', () => clearInterval(timer), { once: true });
 }
 
 // --------------------------------------------------------------- helpers --
@@ -398,6 +583,41 @@ function openFilterMenu(anchor, query, update, api, domain) {
   }
   menu.appendChild(grid);
   const close = popover(anchor, menu);
+  // Opened with the keyboard, the menu has to take focus with it or the
+  // shortcut leaves you looking at a list you cannot reach.
+  const first = grid.querySelector('button');
+  if (first) first.focus();
+  return close;
+}
+
+/** The `?` dialog. */
+function openShortcuts() {
+  const body = h('div', {});
+  const keyStyle = {
+    display: 'inline-block',
+    minWidth: '30px',
+    padding: '2px 8px',
+    textAlign: 'center',
+    border: '1px solid var(--border)',
+    borderRadius: '6px',
+    background: 'var(--bg)',
+    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
+    fontSize: '12px',
+  };
+
+  body.append(
+    h('h2', {}, 'Keyboard shortcuts'),
+    h('p', { class: 'hint' }, 'They stay out of the way while you are typing in a field.'),
+    h(
+      'ul',
+      { class: 'list' },
+      ...SHORTCUTS.map(([key, description]) =>
+        h('li', {}, h('span', { style: keyStyle }, key), h('span', { class: 'grow' }, description)),
+      ),
+    ),
+    h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'button', onClick: () => close() }, 'Close')),
+  );
+  const close = modal(body);
 }
 
 function pickValue(label, key, options, onPick) {

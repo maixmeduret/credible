@@ -212,9 +212,13 @@ export function createServer() {
   });
 }
 
-/** Periodic housekeeping: expired sessions, old salts, retention. */
+/**
+ * Periodic housekeeping: expired sessions, old salts, retention, and the email
+ * scheduler. Running it in-process is what lets a self-hosted instance send
+ * weekly digests without a cron entry or a second container.
+ */
 export function startMaintenance() {
-  const run = () => {
+  const tick = async () => {
     try {
       purgeExpiredSessions();
       purgeOldSalts();
@@ -222,9 +226,20 @@ export function startMaintenance() {
     } catch (err) {
       log.error('Maintenance failed:', err);
     }
+    // Imported lazily: the mail modules are dead weight on an instance that
+    // never configures SMTP, which is most of them.
+    try {
+      const { runScheduler } = await import('./reports.js');
+      await runScheduler();
+    } catch (err) {
+      log.error('Scheduler failed to start:', err);
+    }
   };
-  run();
-  const timer = setInterval(run, 60 * 60 * 1000);
+
+  void tick();
+  // Every 15 minutes: a report names an hour, an alert wants to be timelier
+  // than that, and a quarter hour is cheap when there is nothing to do.
+  const timer = setInterval(() => void tick(), 15 * 60 * 1000);
   timer.unref();
   return timer;
 }

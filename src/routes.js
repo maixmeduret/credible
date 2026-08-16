@@ -57,6 +57,18 @@ import {
 } from './goals.js';
 import { recordEvent } from './ingest/index.js';
 import { nextSteps, provision } from './provision.js';
+import { mailSettings } from './mail/index.js';
+import {
+  createAlert,
+  createReport,
+  deleteAlert,
+  deleteReport,
+  listAlerts,
+  listReports,
+} from './reports.js';
+import { consolidated } from './stats/consolidated.js';
+import { journey, topPaths } from './stats/journeys.js';
+import { deleteImport, importedRange, listImports } from './import.js';
 import {
   createAnnotation,
   createSegment,
@@ -335,7 +347,11 @@ export function registerRoutes() {
       settings: {
         excluded_paths: site.excluded_paths,
         excluded_ips: site.excluded_ips,
+        excluded_countries: site.excluded_countries || '',
+        allowed_hostnames: site.allowed_hostnames || '',
+        bot_filtering: site.bot_filtering || 'standard',
       },
+      imports: listImports(site.id),
       goals: listGoals(site.id),
       funnels: listFunnels(site.id),
       shared_links: listSharedLinks(site.id),
@@ -390,6 +406,48 @@ export function registerRoutes() {
   route('DELETE', '/api/sites/:domain/funnels/:id', ({ req, res, params }) => {
     const { site } = requireOwnedSite(req, params.domain, 'admin');
     deleteFunnel(site.id, Number(params.id));
+    sendJson(res, 200, { ok: true });
+  });
+
+  // ------------------------------------------------- reports and alerts --
+
+  route('GET', '/api/sites/:domain/reports', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'viewer');
+    sendJson(res, 200, { reports: listReports(site.id), alerts: listAlerts(site.id), email: mailSettings() });
+  });
+
+  route('POST', '/api/sites/:domain/reports', async ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'admin');
+    sendJson(res, 201, { report: createReport(site.id, await readJson(req)) });
+  });
+
+  route('DELETE', '/api/sites/:domain/reports/:id', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'admin');
+    deleteReport(site.id, params.id);
+    sendJson(res, 200, { ok: true });
+  });
+
+  route('POST', '/api/sites/:domain/alerts', async ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'admin');
+    sendJson(res, 201, { alert: createAlert(site.id, await readJson(req)) });
+  });
+
+  route('DELETE', '/api/sites/:domain/alerts/:id', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'admin');
+    deleteAlert(site.id, params.id);
+    sendJson(res, 200, { ok: true });
+  });
+
+  // ------------------------------------------------------------ imports --
+
+  route('GET', '/api/sites/:domain/imports', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'viewer');
+    sendJson(res, 200, { imports: listImports(site.id), range: importedRange(site.id) });
+  });
+
+  route('DELETE', '/api/sites/:domain/imports/:id', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'admin');
+    deleteImport(site.id, Number(params.id));
     sendJson(res, 200, { ok: true });
   });
 
@@ -564,6 +622,39 @@ export function registerRoutes() {
     const funnel = get('SELECT * FROM funnels WHERE site_id = ? AND id = ?', [site.id, Number(params.id)]);
     if (!funnel) throw new HttpError(404, 'Funnel not found');
     sendJson(res, 200, funnelReport(scope, funnel, funnelSteps(funnel.id)));
+  });
+
+  /** Path exploration: where visitors went from (or to) a page. */
+  route('GET', '/api/stats/:domain/journey', ({ req, res, params, query }) => {
+    const { site } = authorizeSite(req, query, normalizeDomain(params.domain));
+    const { scope } = buildScope(site, query);
+    sendJson(res, 200, journey(scope, {
+      startPage: query.start_page || '',
+      // Absent, not empty: journey() reads "endPage is a string" as the request
+      // to walk backwards, so passing '' would reverse every unqualified query.
+      ...(query.end_page ? { endPage: query.end_page } : {}),
+      steps: intParam(query.steps, 5, 10),
+      limit: intParam(query.limit, 8, 25),
+      groupDirectories: query.group_directories === 'true',
+    }));
+  });
+
+  /** The most common complete paths through the site. */
+  route('GET', '/api/stats/:domain/paths', ({ req, res, params, query }) => {
+    const { site } = authorizeSite(req, query, normalizeDomain(params.domain));
+    const { scope } = buildScope(site, query);
+    sendJson(res, 200, topPaths(scope, {
+      length: intParam(query.length, 4, 10),
+      limit: intParam(query.limit, 10, 50),
+    }));
+  });
+
+  /** Every site the caller can read, rolled into one view. */
+  route('GET', '/api/stats/consolidated', ({ req, res, query }) => {
+    const user = requireUser(req);
+    const sites = listSitesForUser(user.id);
+    if (!sites.length) throw new HttpError(404, 'No sites to consolidate yet');
+    sendJson(res, 200, consolidated({ sites, query }));
   });
 
   route('GET', '/api/stats/:domain/realtime', ({ req, res, params, query }) => {

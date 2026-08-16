@@ -1,0 +1,64 @@
+{
+  "name": "credible-tracker",
+  "version": "0.1.0",
+  "description": "Thin, dependency-free wrapper around the Credible analytics tracker. Privacy-first, cookieless, no consent banner needed.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/credible-tracker.cjs",
+  "module": "./dist/credible-tracker.js",
+  "types": "./dist/credible-tracker.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/credible-tracker.d.ts",
+        "default": "./dist/credible-tracker.js"
+      },
+      "require": {
+        "types": "./dist/credible-tracker.d.cts",
+        "default": "./dist/credible-tracker.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "build.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test",
+    "prepublishOnly": "node build.js && node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "analytics",
+    "web-analytics",
+    "privacy",
+    "cookieless",
+    "gdpr",
+    "credible",
+    "plausible-alternative",
+    "google-analytics-alternative",
+    "react",
+    "nextjs",
+    "vue",
+    "svelte"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maixmeduret/credible.git",
+    "directory": "integrations/npm"
+  },
+  "homepage": "https://github.com/maixmeduret/credible/tree/main/integrations/npm#readme",
+  "bugs": {
+    "url": "https://github.com/maixmeduret/credible/issues"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -111,6 +111,47 @@ const commands = {
     log.print('');
   },
 
+  /** Bring history in from Plausible, or from a Credible export. */
+  async import() {
+    getDb();
+    const file = positional[0] || flags.file;
+    const domain = flags.domain || positional[1];
+    if (!file || !domain) {
+      fail('Usage: credible import <file.zip|file.csv> --domain example.com [--source auto] [--dry-run] [--json]');
+    }
+    const site = findSiteByDomain(normalizeDomain(domain));
+    if (!site) fail(`Unknown site: ${domain}. Create it first with: credible site:add ${domain}`);
+
+    const { importFile } = await import('../src/import.js');
+    const record = await importFile({
+      siteId: site.id,
+      filePath: path.resolve(file),
+      source: flags.source || 'auto',
+      dryRun: Boolean(flags['dry-run']),
+      onProgress: flags.json ? undefined : (step) => log.print(`  … ${step.message || JSON.stringify(step)}`),
+    });
+
+    if (flags.json) {
+      log.print(JSON.stringify(record, null, 2));
+      return;
+    }
+    log.print('');
+    log.print(`  source     ${record.source}`);
+    log.print(`  status     ${record.status}`);
+    log.print(`  range      ${record.from_date || '—'} → ${record.to_date || '—'}`);
+    log.print(`  rows read  ${record.rows_read}`);
+    log.print(`  events     ${record.events_written}`);
+    log.print(`  aggregates ${record.aggregates_written}`);
+    if (record.error) log.print(`  error      ${record.error}`);
+    log.print('');
+    if (record.aggregates_written) {
+      log.print('  Imported history is stored as daily aggregates: it adds to your totals and to');
+      log.print('  single-dimension breakdowns, but it cannot be cross-filtered — the export has');
+      log.print('  no per-visitor rows, and inventing them would corrupt every later query.');
+      log.print('');
+    }
+  },
+
   /** Check an instance is actually usable, and say what to fix. */
   async doctor() {
     const { diagnose, formatReport } = await import('../src/doctor.js');

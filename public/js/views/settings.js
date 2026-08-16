@@ -1,6 +1,23 @@
 /** Site settings and the account screen. */
 import { clear, h, icon, modal, replace, toast } from '../dom.js';
+import { countryName } from '../format.js';
 import { showSnippet } from './sites.js';
+
+const BOT_LEVELS = [
+  ['off', 'Off', 'Everything that reaches the tracker is counted, crawlers included.'],
+  ['standard', 'Standard', 'Drops clients whose User-Agent names a known bot or automation tool. This is the right choice for almost every site.'],
+  ['strict', 'Strict', 'Also drops requests from datacenter address ranges and ones missing headers every real browser sends — the crawlers wearing an ordinary Chrome User-Agent. Costs you the occasional unusual visitor.'],
+];
+
+/** 'FR, de , ,US' -> ['FR', 'DE', 'US'], anything that is not alpha-2 dropped. */
+function isoCodes(value) {
+  const seen = new Set();
+  for (const raw of String(value || '').split(/[\s,\n]+/)) {
+    const code = raw.trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(code)) seen.add(code);
+  }
+  return [...seen];
+}
 
 function section(title, description, ...children) {
   return h(
@@ -14,7 +31,16 @@ function section(title, description, ...children) {
 
 export async function renderSiteSettings(container, ctx) {
   const { api, domain } = ctx;
-  const payload = await api.site(domain);
+  // The country shield offers the countries this site has actually seen, so
+  // the common case is picking from a list rather than knowing that Czechia is
+  // CZ. It is a nicety: if the breakdown fails, free text still works.
+  const [payload, seenCountries] = await Promise.all([
+    api.site(domain),
+    api
+      .breakdown(domain, { period: '12mo', dimension: 'visit:country', limit: 300 })
+      .then((result) => (result.results || []).map((row) => row.name).filter(Boolean))
+      .catch(() => []),
+  ]);
 
   container.appendChild(
     h(
@@ -70,6 +96,56 @@ export async function renderSiteSettings(container, ctx) {
   const excludedPaths = h('textarea', { rows: '3', placeholder: '/admin/*\n/preview/**' }, payload.settings.excluded_paths);
   const excludedIps = h('textarea', { rows: '2', placeholder: '203.0.113.4' }, payload.settings.excluded_ips);
 
+  // ------------------------------------------------------------- shields --
+  // Three rules the server applies before an event is ever counted. They are
+  // read defensively and written only when they change: an older build of the
+  // API does not return them yet, and saving a blank field on top of a value
+  // the form never saw would silently take the shield down.
+  const savedCountries = isoCodes(payload.settings.excluded_countries).sort();
+  const savedHostnames = String(payload.settings.allowed_hostnames ?? '');
+  const savedBotLevel = BOT_LEVELS.some(([key]) => key === payload.settings.bot_filtering)
+    ? payload.settings.bot_filtering
+    : 'standard';
+
+  const countryOptions = [...new Set([...seenCountries.map((c) => String(c).toUpperCase()), ...savedCountries])]
+    .filter((code) => /^[A-Z]{2}$/.test(code))
+    .sort((a, b) => countryName(a).localeCompare(countryName(b)));
+
+  const excludedCountries = h(
+    'select',
+    { multiple: true, size: String(Math.min(8, Math.max(4, countryOptions.length))), 'aria-label': 'Excluded countries' },
+    ...countryOptions.map((code) =>
+      h('option', { value: code, selected: savedCountries.includes(code) }, `${countryName(code)} (${code})`),
+    ),
+  );
+  // Anything already excluded that the list cannot offer — a country with no
+  // traffic yet — stays visible and editable here rather than disappearing.
+  const otherCountries = h('input', {
+    type: 'text',
+    placeholder: 'US, DE',
+    value: savedCountries.filter((code) => !countryOptions.includes(code)).join(', '),
+  });
+  const allowedHostnames = h('textarea', { rows: '2', placeholder: 'example.com\n*.example.com' }, savedHostnames);
+
+  const botRadios = new Map();
+  const botField = h('div', { class: 'field' }, h('label', {}, 'Bot filtering'));
+  for (const [key, label, explanation] of BOT_LEVELS) {
+    const input = h('input', { type: 'radio', name: 'credible-bot-filtering', value: key, checked: key === savedBotLevel, style: { width: 'auto' } });
+    botRadios.set(key, input);
+    botField.appendChild(
+      h(
+        'label',
+        { style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
+        input,
+        h('span', {}, label, h('small', { style: { display: 'block' } }, explanation)),
+      ),
+    );
+  }
+
+  const chosenCountries = () =>
+    [...new Set([...[...excludedCountries.options].filter((o) => o.selected).map((o) => o.value), ...isoCodes(otherCountries.value)])].sort();
+  const chosenBotLevel = () => [...botRadios].find(([, input]) => input.checked)?.[0] || savedBotLevel;
+
   container.appendChild(
     section(
       'General',
@@ -85,6 +161,30 @@ export async function renderSiteSettings(container, ctx) {
       h('div', { class: 'field' }, h('label', {}, 'Excluded IP addresses'), excludedIps, h('small', {}, 'Your office IP, for example. IPs are never stored — they are only compared at ingest.')),
       h(
         'div',
+        { class: 'field' },
+        h('label', {}, 'Excluded countries'),
+        countryOptions.length
+          ? excludedCountries
+          : h('p', { class: 'notice', style: { margin: 0 } }, 'No country has been seen on this site yet — type the codes below.'),
+        countryOptions.length ? h('small', {}, 'Countries seen on this site. Ctrl/⌘-click to select more than one.') : null,
+      ),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', {}, 'Other country codes'),
+        otherCountries,
+        h('small', {}, 'ISO alpha-2, comma separated. Events from these countries are dropped before they are counted.'),
+      ),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', {}, 'Allowed hostnames'),
+        allowedHostnames,
+        h('small', {}, 'One per line; *.example.com covers subdomains. Leave empty to accept every hostname. Set it and a staging clone sending events with your data-domain stops counting.'),
+      ),
+      botField,
+      h(
+        'div',
         { class: 'form-actions' },
         h(
           'button',
@@ -92,7 +192,11 @@ export async function renderSiteSettings(container, ctx) {
             class: 'btn primary',
             type: 'button',
             onClick: async (event) => {
-              event.target.disabled = true;
+              const button = event.currentTarget;
+              button.disabled = true;
+              const countries = chosenCountries().join(', ');
+              const hostnames = allowedHostnames.value;
+              const botLevel = chosenBotLevel();
               try {
                 await api.updateSite(domain, {
                   timezone: timezone.value.trim(),
@@ -100,12 +204,15 @@ export async function renderSiteSettings(container, ctx) {
                   public: isPublic.checked,
                   excluded_paths: excludedPaths.value,
                   excluded_ips: excludedIps.value,
+                  ...(countries === savedCountries.join(', ') ? {} : { excluded_countries: countries }),
+                  ...(hostnames === savedHostnames ? {} : { allowed_hostnames: hostnames }),
+                  ...(botLevel === savedBotLevel ? {} : { bot_filtering: botLevel }),
                 });
                 toast('Saved');
               } catch (err) {
                 toast(err.message);
               }
-              event.target.disabled = false;
+              button.disabled = false;
             },
           },
           'Save changes',

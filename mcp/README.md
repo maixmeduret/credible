@@ -79,26 +79,94 @@ production, or a client's instance) without being re-registered.
 
 ## Tools
 
+Twenty-three of them. `credible_help` prints the same map at runtime, which is what an assistant
+handed this server mid-conversation should call first.
+
+### Set up and configure
+
 | Tool | What it does | Required arguments |
 |---|---|---|
+| `credible_help` | A map of every tool, grouped by the question it answers, plus which instance this server points at. Makes no network request. | — |
 | `credible_provision` | **The first call on a fresh instance.** Creates the account if there is none, creates the site, returns the API key, the generated password and the install snippet. The key is remembered for the rest of the session. | `email` |
 | `credible_list_sites` | Every site the key can see, with live visitor counts. | — |
 | `credible_add_site` | Start tracking another domain on an instance that is already set up. Returns the snippet. | `domain` |
 | `credible_get_snippet` | The exact `<script>` tag for a site, plus where it goes and how to verify. | `domain` |
 | `credible_verify_install` | *"Is this site receiving data yet?"* — checks realtime and history, reports when the first event arrived, and returns a checklist when nothing has. Call it after editing the site's code. | `domain` |
-| `credible_get_stats` | Headline metrics for a period — visitors, visits, pageviews, views/visit, bounce rate, duration, revenue — plus top sources, pages, countries and goals. Supports comparison. | `domain` |
+| `credible_configure_site` | Read or change timezone, currency, excluded paths, excluded IPs, excluded countries, the hostname allow-list and the bot filtering level. With only `domain`, it reads. Pass a setting as an empty string to clear it; the four list settings take either a comma-separated string or an array of strings. | `domain` |
+| `credible_import_status` | Historical imports for a site and how far along each is. | `domain` |
+
+### Read the numbers
+
+| Tool | What it does | Required arguments |
+|---|---|---|
+| `credible_get_stats` | Headline metrics for a period — visitors, visits, pageviews, views/visit, bounce rate, duration, revenue — plus top sources, pages, countries, goals, and any annotations that fall inside the period. Supports comparison. | `domain` |
+| `credible_compare_periods` | The same query over two arbitrary periods, side by side, with the change on every metric and a sentence to read aloud. | `domain`, `compare_period` |
 | `credible_breakdown` | Rank traffic by any dimension: `visit:source`, `event:page`, `visit:country`, `event:goal`, `event:props:<name>`, … | `domain`, `dimension` |
 | `credible_realtime` | Who is on the site right now and what they are reading. | `domain` |
+| `credible_journey` | Path exploration — the routes visitors take between pages, anchored with `start_page` and/or `end_page`. | `domain` |
+| `credible_consolidated` | Every site on the instance in one rollup for a period. | — |
+
+### Narrow and explain them
+
+| Tool | What it does | Required arguments |
+|---|---|---|
+| `credible_list_segments` | Saved segments on a site, with their filters written out in prose. | `domain` |
+| `credible_create_segment` | Name a set of filters so it can be reused in one argument. `scope: "site"` shares it. | `domain`, `name`, `filters` |
+| `credible_apply_segment` | Run the dashboard through a saved segment — by id or by name — and summarise that audience. | `domain`, `segment` |
+| `credible_list_annotations` | Dated notes on the graph, for a period or for all time. | `domain` |
+| `credible_add_annotation` | Record one: *"shipped the new pricing page"*. | `domain`, `date`, `text` |
+
+### Measure and share
+
+| Tool | What it does | Required arguments |
+|---|---|---|
 | `credible_create_goal` | Create a conversion goal, `event` (custom event name) or `page` (path). Returns the goal id. | `domain`, `type` |
 | `credible_create_funnel` | Wire 2–8 goals into a funnel to see where people drop off. | `domain`, `name`, `goals` |
-| `credible_share_dashboard` | Public (optionally password-protected) link to a dashboard. | `domain` |
 | `credible_track_event` | Record an event server-side — log a conversion the assistant just completed, with props and revenue. | `domain`, `name`, `url` |
+| `credible_share_dashboard` | Public (optionally password-protected) link to a dashboard. | `domain` |
 
 Every tool accepts `instance_url` and `api_key` on top of the arguments listed above.
 
-Periods accepted by `credible_get_stats` and `credible_breakdown`: `realtime`, `day`, `yesterday`,
-`7d`, `28d`, `30d`, `91d`, `month`, `last_month`, `6mo`, `12mo`, `year`, `all`, `custom`
-(with `from` and `to`).
+Periods accepted anywhere a period is taken: `realtime`, `day`, `yesterday`, `7d`, `28d`, `30d`,
+`91d`, `month`, `last_month`, `6mo`, `12mo`, `year`, `all`, `custom` (with `from` and `to`).
+
+### Filtering
+
+Every stats tool takes `filters`, in Credible's JSON wire format — **not** Plausible's
+`visit:country==FR` string syntax, which the instance rejects with `filters must be valid JSON`:
+
+```json
+[["is", "visit:country", ["FR", "BE"]], ["contains", "event:page", ["/blog"]]]
+```
+
+`[operator, dimension, values]`; entries are ANDed, values inside one entry are ORed. Operators:
+`is`, `is_not`, `contains`, `contains_not`, `matches` (a glob, not a regex), `matches_not`.
+
+Any triple can be replaced by a branch — `["and",[…]]`, `["or",[…]]`, `["not",<node>]`,
+`["has_done",<node>]`, `["has_not_done",<node>]`. *Visitors from France who saw pricing but never
+signed up*:
+
+```json
+[["is","visit:country",["FR"]],
+ ["has_done",["is","event:page",["/pricing"]]],
+ ["has_not_done",["is","event:goal",["Signup"]]]]
+```
+
+Pass filters as a JSON string or as an actual array — either is accepted, and **whatever you pass
+is forwarded to the instance untouched**. This server validates no operator and no dimension, on
+purpose: a form it has never heard of still reaches an instance that understands it, and an
+instance that does not answers 422 in its own words rather than having half the question quietly
+dropped on the way out.
+
+`segment` sits on top: pass a saved segment's id or its exact name to any stats tool and its
+filters are applied in addition to whatever you filtered by.
+
+### When a tool says the instance cannot do it
+
+`credible_journey`, `credible_consolidated` and `credible_import_status` need endpoints that older
+instances do not serve. They report that as a readable tool error naming the endpoint, the 404, and
+what to use instead — never a crash, and never a message that sends you hunting for a typo in your
+own arguments.
 
 ## From zero to numbers — a worked transcript
 
@@ -231,9 +299,79 @@ Full dashboard: http://localhost:8000/acme.dev
 > before, mostly direct and Google, with France and the US leading. `/listings` is your strongest
 > page after the homepage. Bounce rate is up 5 points though — worth a look.
 
+**6. It writes down why the numbers moved, instead of leaving the next person to guess.**
+
+`credible_add_annotation { "domain": "acme.dev", "date": "2026-08-16", "text": "Shipped the redesigned pricing page" }`
+
+```
+Noted on acme.dev for 2026-08-16: "Shipped the redesigned pricing page"
+
+It is drawn on the graph for any period covering that day, and credible_list_annotations returns it (annotation #1).
+```
+
+Annotations come back inside `credible_get_stats` from then on, under *What happened in this
+period* — so an assistant reading the graph a month later cannot explain a spike without first
+being told what caused it.
+
+**7. And it can ask about one audience rather than everybody.**
+
+`credible_create_segment { "domain": "acme.dev", "name": "French readers of the blog", "filters": [["is","visit:country",["FR"]],["contains","event:page",["/blog"]]], "scope": "site" }`
+then `credible_apply_segment { "domain": "acme.dev", "segment": "French readers of the blog", "period": "7d" }`
+
+```
+acme.dev — 7d (2026-08-10 to 2026-08-16, Europe/Paris)
+
+Through segment "French readers of the blog" (#1, site-wide):
+  visit:country is FR
+  event:page contains /blog
+
+Visitors        11
+Visits          11
+Pageviews       11
+Views / visit   1
+Bounce rate     0%
+Visit duration  0s
+On site now     0
+
+Top sources
+   1. Direct — 11 visitors, 11 pageviews
+
+Top pages
+   1. /blog/launch — 11 visitors, 11 pageviews
+…
+```
+
+The segment is saved on the site, so the dashboard shows the same one-click filter to whoever opens
+it next. Naming an audience once, in the owner's words, is worth more than rebuilding the filter
+every time somebody asks.
+
+**8. Two periods, side by side, in a shape you can read out loud.**
+
+`credible_compare_periods { "domain": "acme.dev", "period": "7d", "compare_period": "28d" }`
+
+```
+acme.dev — 7d compared with 28d
+
+63 visitors over 7d, down 62% on the 168 visitors over 28d.
+
+                7d    28d  Change
+Visitors        63    168  -62%
+Visits          63    168  -62%
+Pageviews       159   420  -62%
+Views / visit   2.52  2.5  +1%
+Bounce rate     24%   25%  -1 pts
+Visit duration  0s    0s   no change
+
+7d   2026-08-10 to 2026-08-16 (Europe/Paris)
+28d  2026-07-20 to 2026-08-16 (Europe/Paris)
+
+Change reads 7d against 28d. Full dashboard: http://localhost:8000/acme.dev
+```
+
 From there the assistant can keep going without you: `credible_create_goal` for a signup event,
-`credible_create_funnel` to see where people drop out, `credible_share_dashboard` to send a client
-a read-only link, `credible_track_event` to log a conversion it just processed.
+`credible_create_funnel` to see where people drop out, `credible_journey` to see the routes between
+two pages, `credible_configure_site` to stop counting your own office, `credible_share_dashboard`
+to send a client a read-only link, `credible_track_event` to log a conversion it just processed.
 
 ## Notes
 
@@ -253,6 +391,16 @@ environment, which makes "compare staging to production" a single conversation.
 `GET /llms.txt`, with its own origin baked in — useful for assistants that can fetch a URL but
 have no MCP server registered.
 
+**The tool descriptions are the documentation.** A model never reads this file; it reads the
+`description` of each tool and of each argument, and nothing else. They are written to say *when*
+to reach for a tool, not only what it does — that is why they are long, and why changing one is a
+change to the product rather than to a comment.
+
+**Nothing is destructive.** No tool deletes a site, a goal, a segment or an annotation. Creating,
+reading and configuring is the whole surface, and `credible_configure_site` deliberately cannot
+make a dashboard public — `credible_share_dashboard` does that, so publishing is always something
+someone asked for by name.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -262,6 +410,9 @@ have no MCP server registered.
 | `403 … registration is closed` | The instance has `CREDIBLE_OPEN_REGISTRATION=false` and already has an account. Pass an existing `api_key` to `credible_provision`. |
 | `409 … An account already exists for this email` | Pass that account's `password`, or its `api_key`, to add a site to it. |
 | `404 Site not found` | The domain is not tracked by this account. `credible_list_sites` shows what the key can see. |
+| `this Credible instance does not provide …` | The endpoint behind that tool is not in the version running here. Upgrade the instance; the message names what to use meanwhile. |
+| `filters must be valid JSON` | Plausible's `visit:source==Google` syntax was used. Credible takes the JSON form: `[["is","visit:source",["Google"]]]`. |
+| `Segment not found` | The segment id belongs to another site, or was deleted. `credible_list_segments` shows what exists — and a segment can be given by name instead. |
 | Tools do not appear in the client | Check `claude mcp list`, then run `node mcp/server.js --help` — it prints the tool list to stderr and exits. |
 
 ## Development
@@ -276,5 +427,12 @@ node mcp/server.js --help      # tool list and configuration, printed to stderr
 
 The test suite spawns the server as a child process and drives it over stdin/stdout the way a real
 client does: handshake, notification semantics, `tools/list` schema validation, JSON-RPC error
-codes, a genuine provisioning round-trip against a Credible booted in the test process, and the
-unreachable-instance path.
+codes, a genuine provisioning round-trip against a Credible booted in the test process, every tool
+against that instance — segments applied by id and by name, annotations round-tripped through the
+site's own timezone, shields read back out of the database to prove they were written rather than
+echoed — the filter-passthrough contract, and both failure paths: an unreachable instance, and an
+endpoint the instance does not serve.
+
+`TOOLS_AWAITING_AN_ENDPOINT` in `test/mcp.test.js` is the list of endpoints this server calls that
+Credible does not answer yet. Each entry asserts a readable tool error today; when the endpoint
+lands, that assertion fails loudly rather than passing for the wrong reason, which is the point.

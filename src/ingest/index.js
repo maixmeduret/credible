@@ -10,7 +10,7 @@
 import { config } from '../config.js';
 import { get, run, transaction } from '../db/index.js';
 import { findSiteByDomain, isExcludedPath, shieldReason } from '../sites.js';
-import { isBot } from './bots.js';
+import { classifyTraffic } from './bots.js';
 import { classifyReferrer, extractCampaign } from './referrer.js';
 import { parseUserAgent, screenSizeBucket } from './useragent.js';
 import { resolveGeo } from './geo.js';
@@ -65,6 +65,24 @@ function parseRevenue(input, siteCurrency) {
   return { revenue: Math.round(amount * 100), currency: /^[A-Z]{3}$/.test(currency) ? currency : '' };
 }
 
+/** The pathname of a URL, or '' — used for bot probe detection before parsing. */
+function safePathname(rawUrl) {
+  try {
+    return new URL(String(rawUrl || '')).pathname;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Apply the site's filtering level to a `likely` verdict. Certain verdicts have
+ * already been dropped before this is reached.
+ */
+function droppedByBotFilter(site, verdict) {
+  if (!verdict.bot) return false;
+  return (site.bot_filtering || 'standard') === 'strict';
+}
+
 function ipExcluded(site, ip) {
   if (!site.excluded_ips || !ip) return false;
   return site.excluded_ips
@@ -85,7 +103,31 @@ export function recordEvent(body, ctx = {}) {
 
   const name = str(body?.n ?? body?.name, MAX_NAME).trim();
   if (!name) return { status: 'ignored', reason: 'missing event name' };
-  if (isBot(userAgent)) return { status: 'ignored', reason: 'bot' };
+
+  /**
+   * Bot classification runs once — the answer cannot differ between the sites
+   * named in one beacon.
+   *
+   * A `certain` verdict short-circuits here, before any database work: a
+   * self-identified crawler is most of the junk traffic an instance sees, and
+   * making it cost a site lookup is how you turn a crawl into a load problem.
+   * The per-site `bot_filtering` level only governs the `likely` heuristics:
+   *   off      — count everything the heuristics merely suspect
+   *   standard — same as off today; reserved for future certain-but-tunable rules
+   *   strict   — also drop the likely ones: datacenter IPs, a browser claiming
+   *              Chrome with no Sec-Fetch headers, probe paths
+   * "Off" therefore still excludes Googlebot, which is what everybody means by
+   * it — nobody has ever wanted a crawler in their visitor count.
+   */
+  const verdict = classifyTraffic({
+    userAgent,
+    ip: ctx.ip,
+    headers: ctx.headers || {},
+    pathname: safePathname(body?.u ?? body?.url),
+  });
+  if (verdict.bot && verdict.confidence === 'certain') {
+    return { status: 'ignored', reason: 'bot', signal: verdict.reason };
+  }
 
   const rawUrl = str(body?.u ?? body?.url, 2400);
   let url;
@@ -121,6 +163,7 @@ export function recordEvent(body, ctx = {}) {
   for (const domain of domains) {
     const site = findSiteByDomain(domain);
     if (!site) continue;
+    if (droppedByBotFilter(site, verdict)) continue;
     if (isExcludedPath(site, pathname)) continue;
     if (ipExcluded(site, ctx.ip)) continue;
     if (shieldReason(site, { countryCode: geo.country_code, hostname })) continue;
