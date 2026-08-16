@@ -58,6 +58,16 @@ import {
 import { recordEvent } from './ingest/index.js';
 import { nextSteps, provision } from './provision.js';
 import {
+  createAnnotation,
+  createSegment,
+  deleteAnnotation,
+  deleteSegment,
+  findSegment,
+  listAnnotations,
+  listSegments,
+  updateSegment,
+} from './segments.js';
+import {
   Scope,
   aggregate,
   breakdown,
@@ -73,6 +83,7 @@ import {
 import { parseFilters } from './stats/query.js';
 import {
   comparisonRange,
+  formatYmd,
   pickInterval,
   resolveRange,
   startOfDay,
@@ -161,6 +172,15 @@ function buildScope(site, query) {
 
   const goals = listGoals(site.id);
   const filters = parseFilters(query.filters);
+
+  // A saved segment is just more filters, applied on top of whatever the user
+  // has already narrowed to — so a segment and an ad-hoc filter compose.
+  if (query.segment) {
+    const segment = findSegment(site.id, query.segment);
+    if (!segment) throw new HttpError(404, 'Segment not found');
+    filters.push(...parseFilters(JSON.stringify(segment.filters)));
+  }
+
   const scope = new Scope({ site, range, filters, goals });
   return { scope, range, goals, timezone: tz };
 }
@@ -373,6 +393,45 @@ export function registerRoutes() {
     sendJson(res, 200, { ok: true });
   });
 
+  // ------------------------------------------- segments and annotations --
+
+  route('GET', '/api/sites/:domain/segments', ({ req, res, params, query }) => {
+    const { site, user } = authorizeSite(req, query, normalizeDomain(params.domain));
+    sendJson(res, 200, { segments: listSegments(site.id, user?.id ?? null) });
+  });
+
+  route('POST', '/api/sites/:domain/segments', async ({ req, res, params }) => {
+    const { site, user } = requireOwnedSite(req, params.domain, 'viewer');
+    sendJson(res, 201, { segment: createSegment(site.id, user.id, await readJson(req)) });
+  });
+
+  route('PATCH', '/api/sites/:domain/segments/:id', async ({ req, res, params }) => {
+    const { site, user } = requireOwnedSite(req, params.domain, 'viewer');
+    sendJson(res, 200, { segment: updateSegment(site.id, user.id, params.id, await readJson(req)) });
+  });
+
+  route('DELETE', '/api/sites/:domain/segments/:id', ({ req, res, params }) => {
+    const { site, user } = requireOwnedSite(req, params.domain, 'viewer');
+    deleteSegment(site.id, user.id, params.id);
+    sendJson(res, 200, { ok: true });
+  });
+
+  route('GET', '/api/sites/:domain/annotations', ({ req, res, params, query }) => {
+    const { site } = authorizeSite(req, query, normalizeDomain(params.domain));
+    sendJson(res, 200, { annotations: listAnnotations(site.id, { from: query.from, to: query.to }) });
+  });
+
+  route('POST', '/api/sites/:domain/annotations', async ({ req, res, params }) => {
+    const { site, user } = requireOwnedSite(req, params.domain, 'viewer');
+    sendJson(res, 201, { annotation: createAnnotation(site.id, user.id, await readJson(req)) });
+  });
+
+  route('DELETE', '/api/sites/:domain/annotations/:id', ({ req, res, params }) => {
+    const { site } = requireOwnedSite(req, params.domain, 'viewer');
+    deleteAnnotation(site.id, params.id);
+    sendJson(res, 200, { ok: true });
+  });
+
   // ------------------------------------------------------- shared links --
 
   route('POST', '/api/sites/:domain/shared-links', async ({ req, res, params }) => {
@@ -452,6 +511,11 @@ export function registerRoutes() {
       },
       has_goals: goals.length > 0,
       property_keys: propertyKeys(scope),
+      segments: listSegments(site.id, currentUser(req)?.id ?? null),
+      annotations: listAnnotations(site.id, {
+        from: formatYmd(range.start, timezone),
+        to: formatYmd(range.end - 1, timezone),
+      }),
     });
   });
 

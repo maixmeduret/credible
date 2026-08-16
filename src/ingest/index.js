@@ -9,7 +9,7 @@
  */
 import { config } from '../config.js';
 import { get, run, transaction } from '../db/index.js';
-import { findSiteByDomain, isExcludedPath } from '../sites.js';
+import { findSiteByDomain, isExcludedPath, shieldReason } from '../sites.js';
 import { isBot } from './bots.js';
 import { classifyReferrer, extractCampaign } from './referrer.js';
 import { parseUserAgent, screenSizeBucket } from './useragent.js';
@@ -123,6 +123,7 @@ export function recordEvent(body, ctx = {}) {
     if (!site) continue;
     if (isExcludedPath(site, pathname)) continue;
     if (ipExcluded(site, ctx.ip)) continue;
+    if (shieldReason(site, { countryCode: geo.country_code, hostname })) continue;
 
     const acquisition = classifyReferrer({
       referrer: str(body?.r ?? body?.referrer, 1000),

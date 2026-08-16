@@ -122,6 +122,22 @@ export function goalCondition(goal, prefix = 'e') {
 }
 
 /**
+ * Every key a filter may name: the declared dimensions, the goal pseudo
+ * dimension, and any custom property.
+ */
+export function assertFilterableKey(key) {
+  if (typeof key !== 'string' || !key) throw new HttpError(422, 'A filter needs a dimension');
+  if (key === 'event:goal') return key;
+  if (key.startsWith(PROP_PREFIX)) {
+    const prop = key.slice(PROP_PREFIX.length);
+    if (!prop || prop.length > 64) throw new HttpError(422, `Invalid property: ${key}`);
+    return key;
+  }
+  if (!DIMENSIONS[key]) throw new HttpError(422, `Unknown dimension: ${key}`);
+  return key;
+}
+
+/**
  * Parse the `filters` query parameter.
  * Wire format (JSON): [["is","visit:country",["FR","BE"]], ["contains","event:page",["/blog"]]]
  */
@@ -142,6 +158,10 @@ export function parseFilters(input) {
     if (!Array.isArray(entry) || entry.length < 3) throw new HttpError(422, 'Malformed filter');
     const [operator, key, values] = entry;
     if (!FILTER_OPERATORS.has(operator)) throw new HttpError(422, `Unknown filter operator: ${operator}`);
+    // Validate the dimension here rather than at query time. A saved segment is
+    // written once and read forever; rejecting a bad key at the point somebody
+    // can still fix it beats failing inside a query months later.
+    assertFilterableKey(key);
     const list = (Array.isArray(values) ? values : [values]).map((v) => String(v ?? '').slice(0, 500));
     if (!list.length) throw new HttpError(422, 'Filter needs at least one value');
     if (list.length > 100) throw new HttpError(422, 'Too many filter values');

@@ -40,14 +40,17 @@ CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions (user_id);
 -- ------------------------------------------------------------------ sites --
 
 CREATE TABLE IF NOT EXISTS sites (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  domain            TEXT    NOT NULL,
-  timezone          TEXT    NOT NULL DEFAULT 'UTC',
-  public            INTEGER NOT NULL DEFAULT 0,  -- 1 = dashboard readable by anyone
-  excluded_paths    TEXT    NOT NULL DEFAULT '', -- newline separated globs
-  excluded_ips      TEXT    NOT NULL DEFAULT '', -- newline separated
-  currency          TEXT    NOT NULL DEFAULT 'EUR',
-  created_at        INTEGER NOT NULL
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain             TEXT    NOT NULL,
+  timezone           TEXT    NOT NULL DEFAULT 'UTC',
+  public             INTEGER NOT NULL DEFAULT 0,  -- 1 = dashboard readable by anyone
+  excluded_paths     TEXT    NOT NULL DEFAULT '', -- newline separated globs
+  excluded_ips       TEXT    NOT NULL DEFAULT '', -- newline separated
+  excluded_countries TEXT    NOT NULL DEFAULT '', -- comma separated ISO alpha-2
+  allowed_hostnames  TEXT    NOT NULL DEFAULT '', -- comma separated; empty = accept any
+  bot_filtering      TEXT    NOT NULL DEFAULT 'standard', -- 'off' | 'standard' | 'strict'
+  currency           TEXT    NOT NULL DEFAULT 'EUR',
+  created_at         INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sites_domain_idx ON sites (domain);
 
@@ -208,3 +211,57 @@ CREATE TABLE IF NOT EXISTS funnel_steps (
   goal_id    INTEGER NOT NULL REFERENCES goals (id) ON DELETE CASCADE,
   PRIMARY KEY (funnel_id, step_index)
 );
+
+-- --------------------------------------------------- segments & annotations --
+
+-- A named, reusable set of filters. 'personal' is visible only to its owner,
+-- 'site' to everyone who can read the site.
+CREATE TABLE IF NOT EXISTS segments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id    INTEGER NOT NULL REFERENCES sites (id) ON DELETE CASCADE,
+  name       TEXT    NOT NULL,
+  filters    TEXT    NOT NULL,            -- the same JSON wire format as ?filters=
+  scope      TEXT    NOT NULL DEFAULT 'personal', -- 'personal' | 'site'
+  owner_id   INTEGER REFERENCES users (id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS segments_site_idx ON segments (site_id);
+
+-- A dated note on the graph: a launch, a campaign, an outage.
+CREATE TABLE IF NOT EXISTS annotations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id    INTEGER NOT NULL REFERENCES sites (id) ON DELETE CASCADE,
+  date       TEXT    NOT NULL,            -- YYYY-MM-DD in the site's timezone
+  text       TEXT    NOT NULL,
+  author_id  INTEGER REFERENCES users (id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS annotations_site_date_idx ON annotations (site_id, date);
+
+-- ------------------------------------------------------- reports and alerts --
+
+CREATE TABLE IF NOT EXISTS email_reports (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id      INTEGER NOT NULL REFERENCES sites (id) ON DELETE CASCADE,
+  frequency    TEXT    NOT NULL DEFAULT 'weekly',  -- 'weekly' | 'monthly'
+  recipients   TEXT    NOT NULL DEFAULT '',        -- comma separated
+  send_hour    INTEGER NOT NULL DEFAULT 9,         -- 0-23, in the site's timezone
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  last_sent_at INTEGER,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS email_reports_site_idx ON email_reports (site_id);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id        INTEGER NOT NULL REFERENCES sites (id) ON DELETE CASCADE,
+  type           TEXT    NOT NULL DEFAULT 'spike',  -- 'spike' | 'drop'
+  threshold      INTEGER NOT NULL DEFAULT 10,       -- current visitors, or % for a drop
+  recipients     TEXT    NOT NULL DEFAULT '',
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  cooldown_hours INTEGER NOT NULL DEFAULT 12,
+  last_fired_at  INTEGER,
+  created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alerts_site_idx ON alerts (site_id);

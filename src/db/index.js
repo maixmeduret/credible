@@ -65,16 +65,68 @@ function applyPragmas(handle) {
   `);
 }
 
+/**
+ * Schema changes that cannot be expressed as CREATE TABLE IF NOT EXISTS.
+ *
+ * schema.sql is the shape of a *fresh* database and is re-run on every boot, so
+ * new tables and indexes belong there. Anything that alters an existing table
+ * belongs here, keyed by version, and must be safe to run against a database
+ * that already has it — people upgrade by pulling and restarting, with no step
+ * in between, so a migration that can fail is a migration that breaks upgrades.
+ */
+const MIGRATIONS = [
+  {
+    version: 2,
+    describe: 'per-site country and hostname shields',
+    up(handle) {
+      addColumn(handle, 'sites', 'excluded_countries', "TEXT NOT NULL DEFAULT ''");
+      addColumn(handle, 'sites', 'allowed_hostnames', "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 3,
+    describe: 'record why an event was dropped, for the filtering report',
+    up(handle) {
+      addColumn(handle, 'sites', 'bot_filtering', "TEXT NOT NULL DEFAULT 'standard'");
+    },
+  },
+];
+
+/** Add a column only if it is missing. Idempotent by inspection, not by error. */
+function addColumn(handle, table, column, definition) {
+  const columns = handle.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((c) => c.name === column)) return false;
+  handle.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
+}
+
 function migrate(handle) {
   const sql = fs.readFileSync(path.join(here, 'schema.sql'), 'utf8');
   handle.exec(sql);
+
   const row = handle.prepare('SELECT max(version) AS v FROM schema_migrations').get();
-  if (!row || row.v == null) {
-    handle
-      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
-      .run(1, Math.floor(Date.now() / 1000));
+  const current = row?.v ?? 0;
+  const stamp = handle.prepare('INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)');
+  const now_ = Math.floor(Date.now() / 1000);
+
+  if (current === 0) stamp.run(1, now_);
+
+  for (const migration of MIGRATIONS) {
+    if (migration.version <= current) continue;
+    handle.exec('BEGIN IMMEDIATE');
+    try {
+      migration.up(handle);
+      stamp.run(migration.version, now_);
+      handle.exec('COMMIT');
+    } catch (err) {
+      handle.exec('ROLLBACK');
+      throw new Error(`Migration ${migration.version} (${migration.describe}) failed: ${err.message}`);
+    }
   }
 }
+
+/** The schema version this build expects. Surfaced by /api/health. */
+export const SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 1;
 
 function prep(sql) {
   let stmt = stmtCache.get(sql);
