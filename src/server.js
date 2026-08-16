@@ -247,7 +247,38 @@ export function startMaintenance() {
 export async function serve() {
   const server = createServer();
   startMaintenance();
-  await new Promise((resolve) => server.listen(config.port, config.host, resolve));
+  await new Promise((resolve, reject) => {
+    // Every other error surface in this product explains itself; this one used
+    // to dump twelve lines of node:net internals at somebody whose only mistake
+    // was leaving a server running in another terminal.
+    const onError = (err) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(
+          new Error(
+            `Port ${config.port} is already in use — something else is listening there, ` +
+              `possibly another Credible. Start this one on a different port with ` +
+              `CREDIBLE_PORT=${config.port + 1}, or stop the other process.`,
+          ),
+        );
+        return;
+      }
+      if (err.code === 'EACCES') {
+        reject(
+          new Error(
+            `Not allowed to listen on port ${config.port}. Ports below 1024 need root — ` +
+              'use a port above 1024 and put a reverse proxy in front (credible proxy-config).',
+          ),
+        );
+        return;
+      }
+      reject(err);
+    };
+    server.once('error', onError);
+    server.listen(config.port, config.host, () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   return server;
 }
 

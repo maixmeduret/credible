@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { config, originFor } from './config.js';
 import { route, sendHtml } from './server.js';
-import { getDb, get, all, run, now } from './db/index.js';
+import { getDb, get, all, run, now, SCHEMA_VERSION } from './db/index.js';
 import {
   SESSION_COOKIE,
   authenticate,
@@ -225,7 +225,7 @@ export function registerRoutes() {
   registerRoutes.done = true;
 
   // ------------------------------------------------------------- health --
-  route('GET', '/api/health', ({ res }) => {
+  route('GET', '/api/health', ({ req, res }) => {
     const db = getDb();
     const events = db.prepare('SELECT count(*) AS c FROM events').get().c;
     sendJson(res, 200, {
@@ -233,6 +233,15 @@ export function registerRoutes() {
       version: config.version,
       events: Number(events),
       uptime: Math.round(process.uptime()),
+      // Two instances on one machine answer this identically otherwise, and a
+      // caller that reached the wrong one has no way to tell. A tester lost
+      // several minutes to exactly that after a port collision.
+      instance: {
+        base_url: originFor(req),
+        data_dir: config.dataDir,
+        schema: SCHEMA_VERSION,
+        started_at: Math.round(Date.now() / 1000 - process.uptime()),
+      },
     });
   });
 

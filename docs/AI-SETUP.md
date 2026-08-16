@@ -58,6 +58,20 @@ site running on that same laptop. For a real, public site the instance needs a p
 URL — `--target fly`, `--target tunnel`, or a VPS behind Caddy/nginx. `credible doctor` says
 so explicitly if you get this wrong.
 
+**A0. The machine that already serves their site** — the best answer whenever it applies, and
+the one to check for first. If the user has a VPS, a dedicated box, a NAS or a mini PC that
+already serves the site, Credible belongs on it, mounted on their own domain:
+
+```bash
+node bin/credible.js proxy-config --domain their-site.com --mode subpath
+```
+
+That prints the exact Caddy/nginx/Apache/Traefik/HAProxy block, the environment variables the
+service needs, and the reload command. The tracker is then served from
+`https://their-site.com/stats/js/cr.js` — same origin, their existing certificate, and no
+separate hostname for a content blocker to match. See
+[WHERE-TO-HOST.md](WHERE-TO-HOST.md) for which setups can do this and which cannot.
+
 **A. Their machine or a VPS** — no build step, no `npm install`, nothing to install:
 
 ```bash
@@ -330,6 +344,49 @@ broken install but is not one.
 
 Every call below takes `Authorization: Bearer $CREDIBLE_API_KEY`. Nothing here needs the
 dashboard.
+
+### Reports and alerts — read this before building any glue
+
+Credible schedules its own reports and alerts. **Do not write a polling script**; three
+independent testers built one because they did not find this section, and it was wasted work.
+
+```bash
+# A weekly digest as a phone push, via ntfy. No SMTP, no account, nothing to install.
+curl -s -X POST https://INSTANCE/api/sites/example.com/reports \
+  -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
+  -d '{"frequency":"weekly","channel":"ntfy","target":"a-topic-nobody-will-guess"}'
+
+# Tell me when more than 20 people are on the site at once
+curl -s -X POST https://INSTANCE/api/sites/example.com/alerts \
+  -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
+  -d '{"type":"spike","threshold":20,"channel":"ntfy","target":"a-topic-nobody-will-guess"}'
+
+# And when traffic falls below 50% of the same hour last week
+curl -s -X POST https://INSTANCE/api/sites/example.com/alerts \
+  -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
+  -d '{"type":"drop","threshold":50,"channel":"webhook","target":"https://hooks.slack.com/services/…"}'
+```
+
+`channel` is `ntfy`, `webhook` or `email`:
+
+| Channel | `target` | Needs |
+|---|---|---|
+| `ntfy` | a topic (`my-topic`), or a full URL for a self-hosted server (`https://ntfy.home.lan/my-topic`) | nothing |
+| `webhook` | any https URL. Slack and Discord webhook URLs are detected and given the shape each expects; everything else gets a JSON body, HMAC-signed when a secret is set | nothing |
+| `email` | — (use `recipients`) | `CREDIBLE_SMTP_*` on the instance |
+
+Creating an `email` report on an instance with no SMTP is **refused with a 422**, rather than
+accepted and silently never delivered. If you get that error, use `ntfy` — it is the right
+answer for a self-hosted box anyway.
+
+**Always prove it works before telling the user it is set up:**
+
+```bash
+node bin/credible.js report --domain example.com --channel ntfy --target a-topic-nobody-will-guess
+```
+
+That sends one immediately. The scheduler itself runs inside the server process on a 15-minute
+tick — there is no cron to add and no worker to keep alive.
 
 ```bash
 # Everything about a site: settings, goals, funnels, shared_links, members, snippet,

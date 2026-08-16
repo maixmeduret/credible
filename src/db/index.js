@@ -90,6 +90,19 @@ const MIGRATIONS = [
       addColumn(handle, 'sites', 'bot_filtering', "TEXT NOT NULL DEFAULT 'standard'");
     },
   },
+  {
+    version: 4,
+    // Email needs an SMTP server, which is the one piece of infrastructure a
+    // person self-hosting on a box at home does not have and does not want.
+    // A push topic or a webhook URL needs nothing at all.
+    describe: 'deliver reports and alerts to ntfy or a webhook, not only to email',
+    up(handle) {
+      for (const table of ['email_reports', 'alerts']) {
+        addColumn(handle, table, 'channel', "TEXT NOT NULL DEFAULT 'email'");
+        addColumn(handle, table, 'target', "TEXT NOT NULL DEFAULT ''");
+      }
+    },
+  },
 ];
 
 /** Add a column only if it is missing. Idempotent by inspection, not by error. */

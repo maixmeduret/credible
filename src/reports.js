@@ -14,7 +14,8 @@ import { findSite, listAllSites } from './sites.js';
 import { listGoals } from './goals.js';
 import { Scope, aggregate, breakdown, currentVisitors, goalsBreakdown, pagesBreakdown } from './stats/index.js';
 import { resolveRange, zonedParts } from './util/time.js';
-import { mailConfigured, send } from './mail/index.js';
+import { mailConfigured } from './mail/index.js';
+import { deliver, validateChannel } from './notify/index.js';
 import {
   renderDropAlert,
   renderMonthlyReport,
@@ -25,29 +26,45 @@ import {
 const FREQUENCIES = new Set(['weekly', 'monthly']);
 const ALERT_TYPES = new Set(['spike', 'drop']);
 
-const recipientsOf = (value) =>
-  String(value || '')
-    .split(/[\n,;]/)
-    .map((v) => v.trim())
-    .filter((v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v));
-
 // ------------------------------------------------------------------- CRUD --
 
 export function listReports(siteId) {
   return all('SELECT * FROM email_reports WHERE site_id = ? ORDER BY id', [siteId]);
 }
 
-export function createReport(siteId, { frequency = 'weekly', recipients = '', send_hour = 9 } = {}) {
+export function createReport(
+  siteId,
+  { frequency = 'weekly', recipients = '', send_hour = 9, channel = 'email', target = '' } = {},
+) {
   if (!FREQUENCIES.has(frequency)) throw new HttpError(422, 'frequency must be weekly or monthly');
-  const list = recipientsOf(recipients);
-  if (!list.length) throw new HttpError(422, 'Add at least one valid email address');
+  validateChannel({ channel, target, recipients });
+  assertDeliverable(channel);
   const hour = Math.min(23, Math.max(0, Number.parseInt(send_hour, 10) || 9));
 
   const result = run(
-    'INSERT INTO email_reports (site_id, frequency, recipients, send_hour, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
-    [siteId, frequency, list.join(','), hour, now()],
+    'INSERT INTO email_reports (site_id, frequency, recipients, send_hour, channel, target, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+    [siteId, frequency, String(recipients || ''), hour, channel, String(target || ''), now()],
   );
   return get('SELECT * FROM email_reports WHERE id = ?', [Number(result.lastInsertRowid)]);
+}
+
+/**
+ * Refuse to create something that cannot possibly fire.
+ *
+ * Three independent testers hit the same trap: create an email report on an
+ * instance with no SMTP configured, get 201 Created, tell the user "you will
+ * get a digest every Monday" — and nothing ever arrives, with no error
+ * anywhere. A 201 that means "accepted and silently discarded" is worse than a
+ * refusal, so this is the refusal.
+ */
+function assertDeliverable(channel) {
+  if (channel !== 'email') return; // ntfy and webhooks need no server-side setup
+  if (mailConfigured()) return;
+  throw new HttpError(
+    422,
+    'Email is not configured on this instance, so an email report would never be sent. ' +
+      'Set CREDIBLE_SMTP_HOST and its companions, or use channel "ntfy" or "webhook", which need no server.',
+  );
 }
 
 export function deleteReport(siteId, id) {
@@ -58,15 +75,27 @@ export function listAlerts(siteId) {
   return all('SELECT * FROM alerts WHERE site_id = ? ORDER BY id', [siteId]);
 }
 
-export function createAlert(siteId, { type = 'spike', threshold = 10, recipients = '', cooldown_hours = 12 } = {}) {
+export function createAlert(
+  siteId,
+  { type = 'spike', threshold = 10, recipients = '', cooldown_hours = 12, channel = 'email', target = '' } = {},
+) {
   if (!ALERT_TYPES.has(type)) throw new HttpError(422, 'type must be spike or drop');
-  const list = recipientsOf(recipients);
-  if (!list.length) throw new HttpError(422, 'Add at least one valid email address');
+  validateChannel({ channel, target, recipients });
+  assertDeliverable(channel);
   const value = Math.max(1, Number.parseInt(threshold, 10) || 10);
 
   const result = run(
-    'INSERT INTO alerts (site_id, type, threshold, recipients, enabled, cooldown_hours, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)',
-    [siteId, type, value, list.join(','), Math.max(1, Number.parseInt(cooldown_hours, 10) || 12), now()],
+    'INSERT INTO alerts (site_id, type, threshold, recipients, channel, target, enabled, cooldown_hours, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
+    [
+      siteId,
+      type,
+      value,
+      String(recipients || ''),
+      channel,
+      String(target || ''),
+      Math.max(1, Number.parseInt(cooldown_hours, 10) || 12),
+      now(),
+    ],
   );
   return get('SELECT * FROM alerts WHERE id = ?', [Number(result.lastInsertRowid)]);
 }
@@ -124,7 +153,6 @@ function reportPayload(site, frequency) {
 
 /** Send every digest that is owed. Returns how many went out. */
 export async function sendDueReports(at = now()) {
-  if (!mailConfigured()) return 0;
   let sent = 0;
 
   for (const site of listAllSites()) {
@@ -139,7 +167,7 @@ export async function sendDueReports(at = now()) {
             ? renderMonthlyReport({ ...payload, dashboardUrl, instanceUrl: originFor() })
             : renderWeeklyReport({ ...payload, dashboardUrl, instanceUrl: originFor() });
 
-        await send({ to: recipientsOf(report.recipients), ...message });
+        await deliver(report, message, { dashboardUrl, kind: 'report', site: site.domain });
         run('UPDATE email_reports SET last_sent_at = ? WHERE id = ?', [at, report.id]);
         sent += 1;
       } catch (err) {
@@ -162,7 +190,6 @@ export async function sendDueReports(at = now()) {
  * morning look like an outage.
  */
 export async function checkAlerts(at = now()) {
-  if (!mailConfigured()) return 0;
   let fired = 0;
 
   for (const site of listAllSites()) {
@@ -173,7 +200,11 @@ export async function checkAlerts(at = now()) {
       try {
         const message = alertMessage(site, alert, at);
         if (!message) continue;
-        await send({ to: recipientsOf(alert.recipients), ...message });
+        await deliver(alert, message, {
+          dashboardUrl: `${originFor()}/${site.domain}`,
+          kind: alert.type,
+          site: site.domain,
+        });
         run('UPDATE alerts SET last_fired_at = ? WHERE id = ?', [at, alert.id]);
         fired += 1;
       } catch (err) {
@@ -229,9 +260,44 @@ function countVisitors(siteId, from, to) {
   );
 }
 
-/** One pass of both, called by the maintenance timer. Never throws. */
+/**
+ * Send one report right now, ignoring the schedule.
+ *
+ * This is what makes a notification setup testable: configure a channel, run
+ * it, and either the phone buzzes or you get an error naming the reason.
+ * Waiting until Monday to discover a typo in the topic is not a plan.
+ */
+export async function sendReportNow(
+  siteId,
+  { frequency = 'weekly', channel = 'ntfy', target = '', recipients = '' } = {},
+) {
+  const site = findSite(siteId);
+  if (!site) throw new HttpError(404, 'Site not found');
+  validateChannel({ channel, target, recipients });
+
+  const payload = reportPayload(site, frequency);
+  const dashboardUrl = `${originFor()}/${site.domain}`;
+  const message =
+    frequency === 'monthly'
+      ? renderMonthlyReport({ ...payload, dashboardUrl, instanceUrl: originFor() })
+      : renderWeeklyReport({ ...payload, dashboardUrl, instanceUrl: originFor() });
+
+  const result = await deliver({ channel, target, recipients }, message, {
+    dashboardUrl,
+    kind: 'report',
+    site: site.domain,
+  });
+  return { site: site.domain, channel, subject: message.subject, result };
+}
+
+/**
+ * One pass of both, called by the maintenance timer. Never throws.
+ *
+ * It no longer short-circuits on "email is not configured": ntfy and webhook
+ * rows need no server-side setup at all, and skipping them because SMTP is
+ * absent is precisely the silent failure this scheduler is meant not to have.
+ */
 export async function runScheduler(at = now()) {
-  if (!mailConfigured()) return { reports: 0, alerts: 0, skipped: 'email is not configured' };
   try {
     const reports = await sendDueReports(at);
     const alerts = await checkAlerts(at);

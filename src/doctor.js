@@ -23,6 +23,23 @@ async function fetchWithTimeout(url, options = {}, ms = 6000) {
 }
 
 /**
+ * Is the URL being diagnosed the instance this shell is configured for?
+ *
+ * Matched on the configured public URL when there is one, otherwise on the
+ * port, which is the only thing a local instance and this process share.
+ */
+function sameInstance(origin) {
+  if (config.baseUrl && origin.startsWith(config.baseUrl)) return true;
+  try {
+    const { port, hostname } = new URL(origin);
+    const isLoopback = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
+    return isLoopback && Number(port || 80) === Number(config.port);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {object} input
  * @param {string} input.url        instance origin to test, e.g. https://stats.example
  * @param {string} [input.domain]   a tracked domain to check for incoming data
@@ -36,7 +53,12 @@ export async function diagnose({ url, domain = '', apiKey = '', siteUrl = '', lo
   const origin = String(url || '').replace(/\/+$/, '');
 
   // ----------------------------------------------------------- this host --
-  if (local) {
+  // Only when the instance being diagnosed IS this machine's configuration.
+  // Reading our own env while claiming to describe a remote instance produced
+  // confidently wrong output — "CREDIBLE_BASE_URL is unset" about a server that
+  // was started with it — and sent a tester off to re-check a correct setup.
+  const describesThisShell = !origin || sameInstance(origin);
+  if (local && describesThisShell) {
     const major = Number(process.versions.node.split('.')[0]);
     checks.push(
       major >= 22
@@ -80,6 +102,16 @@ export async function diagnose({ url, domain = '', apiKey = '', siteUrl = '', lo
             'CREDIBLE_BASE_URL is unset, so snippets and shared links are built from the Host header',
             'Set CREDIBLE_BASE_URL to the URL visitors will load the script from.',
           ),
+    );
+  }
+
+  if (local && !describesThisShell) {
+    checks.push(
+      skip(
+        'local_env',
+        'This machine',
+        `not checked — ${origin} is a different instance, so this shell's configuration says nothing about it`,
+      ),
     );
   }
 

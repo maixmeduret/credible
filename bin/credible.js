@@ -111,6 +111,32 @@ const commands = {
     log.print('');
   },
 
+  /** Send a report right now, to prove a channel works before trusting it. */
+  async report() {
+    getDb();
+    const domain = flags.domain || positional[0];
+    if (!domain) {
+      fail(
+        'Usage: credible report --domain example.com --channel ntfy --target my-topic\n' +
+          '                       [--frequency weekly|monthly] [--json]\n' +
+          '       channels: ntfy (a topic), webhook (a URL), email (needs CREDIBLE_SMTP_*)',
+      );
+    }
+    const site = findSiteByDomain(normalizeDomain(domain));
+    if (!site) fail(`Unknown site: ${domain}`);
+
+    const { sendReportNow } = await import('../src/reports.js');
+    const result = await sendReportNow(site.id, {
+      frequency: flags.frequency || 'weekly',
+      channel: flags.channel || 'ntfy',
+      target: flags.target || '',
+      recipients: flags.to || flags.recipients || '',
+    });
+
+    if (flags.json) log.print(JSON.stringify(result, null, 2));
+    else log.print(`\n  Sent via ${result.channel}: ${result.subject}\n`);
+  },
+
   /** Bring history in from Plausible, or from a Credible export. */
   async import() {
     getDb();
@@ -484,6 +510,11 @@ const commands = {
                              [--target auto|local|tunnel|docker|fly] [--site-path .] [--json]
   deploy                   stand up a persistent instance
                              [--target …] [--port …] [--detect] [--dry-run] [--yes] [--json]
+  report                   send a traffic report now, through any channel
+                             --domain example.com --channel ntfy --target my-topic
+                             [--frequency weekly|monthly] [--json]
+  import <file>            bring history in from Plausible or a CSV export
+                             --domain example.com [--dry-run] [--json]
   proxy-config             the reverse-proxy block that serves Credible from
                            your own domain (first-party tracking)
                              --domain monsite.fr [--server caddy|nginx|apache|traefik|haproxy]
@@ -585,6 +616,10 @@ if (!handler) {
 try {
   await handler();
 } catch (err) {
-  log.error(err);
+  // A stack trace is for a bug, not for "that port is busy". The message is
+  // written to be actionable on its own; the trace is one env var away when it
+  // genuinely is a bug.
+  log.print(`\n  ${err.message}\n`);
+  if (config.logLevel === 'debug') log.error(err);
   process.exit(1);
 }

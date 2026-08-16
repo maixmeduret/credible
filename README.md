@@ -250,6 +250,12 @@ Everything is environment variables — there is no config file to manage.
 | `CREDIBLE_RATE_LIMIT` | `600` | Ingest events per minute per IP (`0` disables) |
 | `CREDIBLE_RETENTION_DAYS` | `0` | Delete events older than N days (`0` keeps forever) |
 | `CREDIBLE_LOG_LEVEL` | `info` | `error`, `warn`, `info`, or `debug` |
+| `CREDIBLE_SMTP_HOST` | *(none)* | SMTP server, for email reports. Leave unset and use ntfy or a webhook instead |
+| `CREDIBLE_SMTP_PORT` | `587` | `465` implies TLS, `587` uses STARTTLS |
+| `CREDIBLE_SMTP_USER` | *(none)* | SMTP username |
+| `CREDIBLE_SMTP_PASS` | *(none)* | SMTP password or app password |
+| `CREDIBLE_SMTP_SECURE` | *(guessed from the port)* | Force implicit TLS |
+| `CREDIBLE_SMTP_FROM` | `credible@<host>` | The From address on reports |
 
 The complete list, including the tuning and geo-database settings, is in
 [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md#configuration-reference).
@@ -310,12 +316,39 @@ a completed payment, a signup confirmed by webhook — without trusting the brow
 them. Every endpoint, metric, dimension and filter operator is in
 **[docs/API.md](docs/API.md)**.
 
+## Reports and alerts
+
+Credible sends you your own numbers, on a schedule or when something happens —
+weekly and monthly digests, traffic spikes, traffic drops.
+
+Three delivery channels, and two of them need no infrastructure at all:
+
+```bash
+# A push notification to your phone, via ntfy. Nothing to install or configure.
+curl -X POST https://YOUR-INSTANCE/api/sites/yourdomain.com/reports \
+  -H "Authorization: Bearer $CREDIBLE_API_KEY" -H 'content-type: application/json' \
+  -d '{"frequency":"weekly","channel":"ntfy","target":"my-secret-topic"}'
+
+# Send one right now, to check it actually arrives
+node bin/credible.js report --domain yourdomain.com --channel ntfy --target my-secret-topic
+```
+
+| Channel | Needs | Good for |
+|---|---|---|
+| `ntfy` | a topic name | a phone, a home server, no accounts anywhere |
+| `webhook` | a URL | Slack, Discord, or your own endpoint (HMAC signed) |
+| `email` | an SMTP server (`CREDIBLE_SMTP_*`) | inboxes, and people who already run mail |
+
+The scheduler runs inside the same process — no cron, no worker, nothing else to
+keep alive. Creating a report on a channel that cannot deliver is refused at
+creation time rather than failing silently later.
+
 ## Roadmap
 
 Not built yet, in rough order of interest. Opinions welcome in the issues:
 
-- Scheduled email and RSS summary reports
-- Importers for Google Analytics and Plausible exports
+- A Google Analytics 4 importer (Plausible and CSV imports already work: `credible import`)
+- RSS summary feeds
 - An optional columnar backend (DuckDB or ClickHouse) for instances that outgrow SQLite
 - More deployment recipes, and an ARM container image
 
