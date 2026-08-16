@@ -25,31 +25,39 @@ run one command, paste one script tag. Every feature is in the box, forever, for
 ## Why Credible
 
 Google Analytics and Plausible are the two tools most people weigh against each other.
-Plausible is excellent, genuinely open source, and the direct inspiration for this project —
-if you want a hosted, supported, commercially backed product, go pay them; it is worth it.
-Credible exists for a narrower case: you want to *own* the whole thing, on your own box, with
-as little machinery as possible, and you do not want a feature matrix with a price attached.
+Plausible is excellent and the direct inspiration for this project — if you want a hosted,
+supported, commercially backed product, go pay them; it is worth it. Credible exists for a
+narrower case: you want to *own* the whole thing, on your own box, with as little machinery
+as possible, and you do not want a feature matrix with a price attached.
 
 | | **Credible** | **Google Analytics 4** | **Plausible Cloud** |
 |---|---|---|---|
-| Price | Free, self-hosted only | Free (you pay in data) | Paid, from ~$9/mo by volume |
-| Open source | Yes, AGPL-3.0 | No | Yes, AGPL-3.0 |
+| Price | Free, self-hosted only | Free (you pay in data) | Paid, from $9/mo by volume; 30-day trial, no free tier |
+| License | AGPL-3.0, all of it | Proprietary | Open core: AGPL-3.0 core, premium features proprietary |
 | Cookies / consent banner | None required | Required in the EU | None required |
 | Personal data stored | None | Substantial | None |
-| Script size | 4.5 KB gzipped | ~50 KB+ | ~1 KB gzipped |
+| Script size | 4.5 KB gzipped | ~50 KB+ | ~2.5 KB gzipped |
 | Where the data lives | Your disk | Google's | Plausible's EU servers |
 | Setup | One Node process + a file | Tag manager + config | Signup |
 | Self-host stack | Nothing but Node ≥ 22.13 | n/a | Postgres + ClickHouse + Docker Compose |
-| Data sampling | Never | Above thresholds | Never |
-| Funnels, revenue, custom properties | Included | Included | Included on higher tiers |
+| Data sampling | Never | Above thresholds | Only on views above 10M pageviews |
+| Funnels, revenue, custom properties | Included | Included | Business plan, from $19/mo |
+| Stats API | Included | Yes | Business plan, 600 req/hr |
+| Site provisioning API | Included | Yes (Admin API) | Enterprise plan |
+| Bot filtering | User-Agent based | — | Advanced: data-centre IP ranges + network-wide detection |
 | Data ownership | Total | None | Yours, on their infra |
 
 **The honest summary.** Against Google Analytics the argument is privacy, simplicity, and
 ownership. Against Plausible the argument is much narrower: their self-hosted edition is a
 Docker Compose stack with Postgres and ClickHouse behind it, which is the right call at their
-scale and overkill at yours. Credible is one process and one file you can back up with `cp`.
-If you outgrow that — and [we tell you exactly when](docs/ARCHITECTURE.md#scaling-notes) —
-Plausible or Matomo is a good place to land.
+scale and overkill at yours, and several of its features are held back for the paid product.
+Credible is one process and one file you can back up with `cp`. What Plausible has that
+Credible does not is seven years of accumulated engineering, bot filtering trained across an
+entire network of sites, a Google Analytics importer, a Search Console integration, and a
+company that answers support mail. If you outgrow one machine — and
+[we tell you exactly when](docs/ARCHITECTURE.md#scaling-notes) — Plausible or Matomo is a good
+place to land. The full, footnoted comparison is in
+[docs/COMPARISON.md](docs/COMPARISON.md).
 
 ## 60-second quickstart
 
@@ -332,8 +340,10 @@ Copyright (C) 2026 Credible contributors.
 
 In plain terms: you may use, modify and self-host it freely, including commercially. If you
 modify it and offer it to other people over a network, you must publish your changes under
-the same license. That is deliberate — it is the same choice Plausible made, and it keeps
-this project open for good rather than becoming the free tier of somebody's closed SaaS.
+the same license. That is deliberate — it is the license Plausible chose for their core in
+2020, and it keeps this project open for good rather than becoming the free tier of
+somebody's closed SaaS. Unlike Plausible, there is no second directory under a different
+license: the AGPL covers every feature Credible has, and there is nothing held back.
 
 Credible is not affiliated with Plausible Insights OÜ, Google LLC, or any other product
 mentioned in this repository.
